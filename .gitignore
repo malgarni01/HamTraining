@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor / tooling
+.vscode/
+.claude/
+.idea/
+
+# Data and docs (excluded by design)
+Data/
+*.md
+License_CC-BY-NC_4.0.txt
