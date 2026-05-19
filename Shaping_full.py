@@ -12,6 +12,7 @@ import random  # for random number selection
 from time import perf_counter  # for calculating latencies/timers
 import time
 import os
+import sys
 from iointerface_api import *
 from platform_config import play_sound, ensure_sound_files
 
@@ -20,7 +21,13 @@ ensure_sound_files()
 scan_time = 1
 print(f"scanning for {scan_time} seconds, please wait...")
 
-devices = IOInterface.discover_interfaces(timeout=scan_time)
+# On the Med Associates COM-106 (Windows) drive the ENV-204 feeder through
+# MED-PC's file-drop backend; elsewhere fall back to Mock/serial. The MED-PC
+# backend itself falls back to MockDevice if C:\MED-PC is not present, so a
+# plain Windows dev box still runs without stalling on dispense acks.
+USE_MEDPC = sys.platform == "win32"
+devices = IOInterface.discover_interfaces(timeout=scan_time,
+                                          use_medpc=USE_MEDPC)
 for device in devices:
     print(f"Found I/O Interface: {device.address}")
 
@@ -161,11 +168,16 @@ def reinforcement():
         # these commands are responsible for signaling the pellet dispenser
         # if you want to change reinforcer amount, that can be done through the ReinfAmt variable
         # otherwise try not to touch
-        # the send.py file should be placed in the location specified below in the commands
-        # or the path should be changed accordingly
-        # this also follows for the commands using aplay to play a tone
+        # On the MED-PC backend, write_output(1, ACTIVE) arms the feeder and
+        # write_output(1, INACTIVE) commits one IR-verified dispense request;
+        # on Mock/serial these are plain output toggles (unchanged behavior).
         device.write_output(1, IOState.INACTIVE)  # Stop asserting pellet dispenser
         device.write_output(2, IOState.INACTIVE)  # Turn of beeper
+
+    # IR-verification payoff: snapshot the cumulative delivered count so we
+    # can log requested-vs-actually-delivered for this reinforcement. This is
+    # a no-op attribute on Mock/serial devices (getattr default -> None).
+    _delivered_before = getattr(device, "pellets_delivered_total", None)
 
     while True:
         device.write_output(1, IOState.ACTIVE)  # Turn on pellet dispenser
@@ -176,6 +188,19 @@ def reinforcement():
         reinforcers += 1  # breaks from loop when reinforcement limit is reached
         if reinforcers >= ReinfAmt:
             break
+
+    # Per-trial IR-verification log (MED-PC backend only).
+    if _delivered_before is not None:
+        requested = int(ReinfAmt)
+        delivered = getattr(device, "pellets_delivered_total",
+                            _delivered_before) - _delivered_before
+        status = getattr(device, "last_status", None)
+        if getattr(device, "last_empty_hopper", False) or delivered < requested:
+            print(f"[REWARD] trial {trial}: requested={requested} "
+                  f"delivered={delivered} status={status} *** CHECK FEEDER ***")
+        else:
+            print(f"[REWARD] trial {trial}: requested={requested} "
+                  f"delivered={delivered} status={status}")
 
 
 # START MAIN PROGRAM LOOP

@@ -1,0 +1,88 @@
+\ ===========================================================================
+\ CoasterChase.mpc  --  MED-PC V MSN for the DARPA CoasterChase integration
+\ ---------------------------------------------------------------------------
+\ Plan : Manuals/MED-PC_Integration_Plan.pdf  Section 4.1
+\ Base : DOC-337 Example 3.5 (verified multi-pellet dispense) + a BKGRND
+\        file-drop polling wrapper (DOC-301 App. C BKGRND pattern).
+\
+\ Deploy: place this file in C:\MED-PC\MSN\ , load Box 1 with it via the
+\         MPCLoader macro  L;1;<subj>;<expt>;<grp>;CoasterChase  then  S;1.
+\
+\ WIRING / EQUATES (must match the Hardware Config Utility mapping):
+\   ^VeriFEED  = Output 1  (MedOPERATE,  SG-716B Output 1, active-low)
+\   ^Delivered = Input  1  (MedINPUT, ENV-204 IR sentry, 20 ms pulse)
+\
+\ VARIABLES (all scalar reals; G is deliberately NOT used because MED-PC
+\            pre-dimensions G as an array[0..10] -- see DOC-301 App. D):
+\   R = pellets requested for the current request   (set by BackProc1)
+\   S = sequence id of the current request           (set by BackProc1)
+\   Q = request-pending flag 0/1                      (set 1 by BackProc1,
+\                                                      cleared 0 here)
+\   E = session-end flag 0/1                          (set by BackProc1 on
+\                                                      cmd=stop)
+\   D = BKGRND handshake flag 0/1  (MSN sets 0 before BKGRND, Pascal sets 1)
+\   C = pellets commanded so far this request
+\   P = pellets IR-verified this request
+\   V = pellets IR-verified this session (cumulative)
+\   X = empty-hopper timeouts this session (cumulative)
+\   T = elapsed seconds for the current request (BackProc2 -> elapsed_ms)
+\
+\ SHOW fields on the MED-PC screen:
+\   1 status text   2 verified(session)   3 last delivered
+\   4 empty-hopper errors   5 seq   6 requested
+\ ===========================================================================
+
+^VeriFEED  = 1
+^Delivered = 1
+
+
+S.S.1,        \ ---- request / dispense controller -----------------------
+S1,           \ IDLE: poll the trigger directory every 50 ms
+   0.05": SET D = 0; BKGRND 1 ---> S2
+
+S2,           \ wait for BackProc1 to finish (it sets D = 1)
+   0.01": IF D = 1 [] ---> S3
+
+S3,           \ did BackProc1 load a dispense request?
+   0.01": IF Q = 1 [@disp, @none]
+      @disp: SET P = 0; SET C = 0; SET T = 0;
+             SHOW 5, Seq, S, 6, Requested, R ---> S4
+      @none: ---> S1
+
+S4,           \ still pellets left to command for this request?
+   0.01": IF C < R [@more, @full]
+      @more: ---> S5
+      @full: ---> S8
+
+S5,           \ prime VeriFEED (active-low: ON drives the operate line low)
+   0.01": ADD C; ON ^VeriFEED ---> S6
+
+S6,           \ release after 20 ms -- the dispense fires on the low->high
+   0.02": OFF ^VeriFEED ---> S7
+
+S7,           \ wait for IR verification, or 80 s empty-hopper timeout
+   #R^Delivered: ADD P; ADD V; SHOW 2, Verified-sess, V ---> S4
+   80": ADD X; SHOW 4, Empty-hopper-errs, X ---> S8
+
+S8,           \ emit the ack for this request via BackProc2
+   0.01": SET D = 0; BKGRND 2 ---> S9
+
+S9,           \ wait for BackProc2 to finish
+   0.01": IF D = 1 [] ---> S10
+
+S10,          \ request complete: clear pending, back to idle polling
+   0.01": SET Q = 0; SHOW 3, Last-delivered, P ---> S1
+
+
+S.S.2,        \ ---- session-end watcher --------------------------------
+S1,
+   0.2": IF E = 1 [@stop, @run]
+      @stop: ---> STOPSAVE
+      @run:  ---> SX
+
+
+S.S.3,        \ ---- per-request elapsed-time accumulator ----------------
+S1,
+   0.01": IF Q = 1 [@tick, @idle]
+      @tick: SET T = T + 0.01 ---> SX
+      @idle: ---> SX

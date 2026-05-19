@@ -1,7 +1,7 @@
 """Cross-platform configuration for Pig Behavioral Testing Suite.
 
 Centralizes OS-specific logic (audio, paths) so program files stay clean.
-Supports macOS and Linux (Raspberry Pi).
+Supports macOS, Linux (Raspberry Pi), and Windows (Med Associates COM-106).
 """
 
 import os
@@ -14,6 +14,7 @@ import math
 
 IS_MACOS = sys.platform == "darwin"
 IS_LINUX = sys.platform.startswith("linux")
+IS_WINDOWS = sys.platform == "win32"
 
 # Resolve paths relative to this script's directory
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -38,11 +39,18 @@ def play_sound(filename):
         if IS_MACOS:
             subprocess.Popen(["afplay", filepath],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif IS_WINDOWS:
+            import winsound
+            # SND_ASYNC -> non-blocking, matches the afplay/aplay behavior.
+            winsound.PlaySound(filepath,
+                               winsound.SND_FILENAME | winsound.SND_ASYNC)
         else:
             subprocess.Popen(["aplay", filepath],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except FileNotFoundError:
         print(f"Warning: audio player not found for {filename}")
+    except RuntimeError as e:
+        print(f"Warning: Windows sound playback failed for {filename}: {e}")
 
 
 def _generate_tone(filepath, frequency, duration, sample_rate=44100, amplitude=0.8):
