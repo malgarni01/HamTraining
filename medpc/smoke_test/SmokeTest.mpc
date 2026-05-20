@@ -1,0 +1,80 @@
+\ ===========================================================================
+\ SmokeTest.mpc  --  STEP 8.6 SMOKE TEST MSN  (matches smoke_test/BACKPROC.PAS)
+\ ---------------------------------------------------------------------------
+\ Plan : Manuals/MED-PC_Integration_Plan.pdf  Section 8 step 6
+\
+\ Purpose: prove that
+\   (a) BACKPROC.PAS compiles via TRANS Batch Translate! on this COM-106,
+\   (b) MED-PC actually fires BackProcN when MSN calls  BKGRND N,
+\   (c) the D-flag handshake (DOC-301 p.212) round-trips correctly.
+\
+\ This MSN does NOT touch the feeder, NOT touch the trigger\ directory,
+\ NOT depend on anything in the production CoasterChase.mpc.  It only
+\ exercises the BKGRND mechanism itself.
+\
+\ Deploy:
+\   1. Place this file in C:\MED-PC\MSN\ alongside the smoke-test
+\      BACKPROC.PAS (which lives at C:\MED-PC\BACKPROC.PAS once swapped in).
+\   2. In MED-PC: File | Open SmokeTest.mpc, then
+\         Translation | Batch Translate!
+\      Confirm the compile log shows BACKPROC.PAS recompiling without errors.
+\   3. Load Box 1 with SmokeTest:    L;1;0;0;0;SmokeTest    then   S;1
+\      (or via the GUI:  Load Macro -> SmokeTest, START Box 1).
+\
+\ Pass criteria (watch the MED-PC screen for Box 1):
+\   - Field 1 "BKGRND-1 calls C" increments roughly once per second.
+\   - Field 2 "BKGRND-2 calls K" increments roughly once per second.
+\   - Field 3 "Last D-roundtrip" stays at 1 (handshake completes).
+\   - Field 4 "Stuck count" stays at 0 (D never failed to flip in 200 ms).
+\   If field 4 ever increments, the handshake is broken -- check that
+\   BACKPROC.PAS sets BigArr[Vars['D'].StartOffset] := 1 BEFORE clearing
+\   BackRequest[Box][N].
+\
+\ Stop:  press the STOP button for Box 1, or type   STS;1   in the terminal.
+\
+\ VARIABLES:
+\   D = handshake flag (Pascal sets 1, MSN clears 0)
+\   C = count of BKGRND-1 round-trips this session
+\   K = count of BKGRND-2 round-trips this session
+\   F = "last D-roundtrip" indicator (1 = good, 0 = bad)
+\   N = stuck-handshake counter
+\ ===========================================================================
+
+
+S.S.1,        \ ---- alternate BKGRND 1 and BKGRND 2, ~1 s each ---------
+S1,
+   #START: SET D = 0; SET C = 0; SET K = 0; SET F = 0; SET N = 0 ---> S2
+
+\ ----- BKGRND 1 leg ---------------------------------------------------
+S2,           \ wait 1 s, then call BKGRND 1
+   1": SET D = 0; BKGRND 1 ---> S3
+
+S3,           \ fast poll: D up immediately?
+   0.01": IF D = 1 [@ok, @wait]
+      @ok:   ADD C; SET F = 1;
+             SHOW 1, BKGRND-1 calls C, C, 3, Last D-roundtrip, F ---> S6
+      @wait: ---> S4
+
+S4,           \ slow poll: allow up to 0.2 s total
+   0.19": IF D = 1 [@late, @stuck]
+      @late:  ADD C; SET F = 1;
+              SHOW 1, BKGRND-1 calls C, C, 3, Last D-roundtrip, F ---> S6
+      @stuck: ADD N; SET F = 0;
+              SHOW 3, Last D-roundtrip, F, 4, Stuck count, N ---> S6
+
+\ ----- BKGRND 2 leg ---------------------------------------------------
+S6,           \ wait 1 s, then call BKGRND 2
+   1": SET D = 0; BKGRND 2 ---> S7
+
+S7,
+   0.01": IF D = 1 [@ok, @wait]
+      @ok:   ADD K; SET F = 1;
+             SHOW 2, BKGRND-2 calls K, K, 3, Last D-roundtrip, F ---> S2
+      @wait: ---> S8
+
+S8,
+   0.19": IF D = 1 [@late, @stuck]
+      @late:  ADD K; SET F = 1;
+              SHOW 2, BKGRND-2 calls K, K, 3, Last D-roundtrip, F ---> S2
+      @stuck: ADD N; SET F = 0;
+              SHOW 3, Last D-roundtrip, F, 4, Stuck count, N ---> S2

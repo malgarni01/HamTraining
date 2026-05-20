@@ -194,11 +194,16 @@ class MedPCFileDropDevice:
         os.replace(tmp, path)  # atomic within the same directory
 
     def _send_request(self, cmd, reward_size=1, wait=True, seq_name=None):
+        # Fixed-filename IPC (see medpc/BACKPROC.PAS header for the rationale):
+        # all dispense / stop traffic shares the single trigger\request.req
+        # slot, heartbeats use their own trigger\heartbeat.req slot. The seq
+        # number is carried inside the file (not the filename) so an ack
+        # can still be cross-checked against the request that produced it.
         if seq_name is None:
             with self._lock:
                 self._seq += 1
                 seq = self._seq
-            name = f"{seq:06d}"
+            name = "request"
             seq_field = str(seq)
         else:
             seq = seq_name
