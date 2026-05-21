@@ -16,4 +16,8 @@ venv/
 # Data and docs (excluded by design)
 Data/
 *.md
+# ...but keep the project docs that ship with the repo
+!docs/*.md
+!medpc/*.md
+!README.md
 License_CC-BY-NC_4.0.txt
