@@ -224,7 +224,6 @@ def stage_0():
     # loop function
     def stage_0_loop():
         global response, hand_shape_resp, stage_0_start_time, stage_0_responses, color_on
-        stage_timer.cancel()
 
         # response is the button variable, default set to 0
         # on button press, the response variable is changed in the press() function, triggering this if statement
@@ -279,10 +278,8 @@ def stage_0():
             else:
                 stage_0()
 
-    # timer incrementing statements
-    increment = 0.01
-    stage_timer = Timer(increment, stage_0_loop)
-    stage_timer.start()
+    # schedule next tick on the Tk main thread (gui.after, not threading.Timer)
+    gui.after(10, stage_0_loop)
 
 # ---------------------------------------------------------------------------
 # Stage 1: Same as stage 0, except only presses when the screen illuminated result in pellet delivery
@@ -303,7 +300,6 @@ def stage_1_setup():
 def stage_1():
     def stage_1_loop():
         global response, hand_shape_resp, stage_1_start_time, stage_1_responses
-        stage_timer.cancel()
 
         # response if block, waiting for button press
         if response != 0:
@@ -331,9 +327,7 @@ def stage_1():
         else:
             stage_1()
 
-    increment = 0.01
-    stage_timer = Timer(increment, stage_1_loop)
-    stage_timer.start()
+    gui.after(10, stage_1_loop)
 
 # ---------------------------------------------------------------------------
 # Stage 2: Button now moves horizontally but full screen width. Same size button every trial
@@ -354,7 +348,6 @@ def stage_2_setup():
 def stage_2():
     def stage_2_loop():
         global response, stage_2_start_time, stage_2_responses
-        stage_timer.cancel()
 
         # response if block, waiting for button press
         if response != 0:
@@ -378,9 +371,7 @@ def stage_2():
             else:
                 stage_2()
 
-    increment = 0.01
-    stage_timer = Timer(increment, stage_2_loop)
-    stage_timer.start()
+    gui.after(10, stage_2_loop)
 
 # ---------------------------------------------------------------------------
 # Stage 3: Button begins moving around 5 possible positions on screen, though stays the same size
@@ -406,7 +397,6 @@ def stage_3_setup():
 def stage_3():
     def stage_3_loop():
         global response, stage_3_start_time, stage_3_responses, stage_3_omissions
-        stage_timer.cancel()
 
         # response if block, waiting for button press
         if response != 0:
@@ -430,9 +420,7 @@ def stage_3():
             else:
                 stage_3()
 
-    increment = 0.01
-    stage_timer = Timer(increment, stage_3_loop)
-    stage_timer.start()
+    gui.after(10, stage_3_loop)
 
 # ---------------------------------------------------------------------------
 # Stage 4: Button begins moving around the screen, changing size based on number of correct responses
@@ -488,7 +476,6 @@ def stage_4_setup():
 def stage_4():
     def stage_4_loop():
         global response, stage_4_start_time, stage_4_responses, stage_4_omissions, inc, stage_4_incorrects
-        stage_4_timer.cancel()
 
         # incorrect if block, waiting for button press
         if inc != 0:
@@ -527,9 +514,7 @@ def stage_4():
             else:
                 stage_4()
 
-    increment = 0.1
-    stage_4_timer = Timer(increment, stage_4_loop)
-    stage_4_timer.start()
+    gui.after(100, stage_4_loop)
 
 # exit program function, clears gui elements, calls report function
 def exit_program():
@@ -539,23 +524,16 @@ def exit_program():
 
 # report function, destroys gui, calls report_end function
 def report():
+    # Cancel pending after() callbacks so they don't fire on a destroyed root
+    # and print "invalid command name ..." at shutdown.
+    for aid in gui.tk.eval('after info').split():
+        gui.after_cancel(aid)
     gui.destroy()
     report_end()
 
-# gui clear function called by exit_program
+# gui clear function called by exit_program (report() destroys gui)
 def end_program():
-    global stage_timer
-
-    def gui_destroy():
-        resp_btn.destroy()
-        inc_btn.destroy()
-
-    try:
-        stage_timer.cancel()
-        # outputs_off()
-        gui.destroy()
-    except NameError:
-        gui_destroy()
+    pass
 
 # setup function, called on program start
 def start():
@@ -572,8 +550,7 @@ def start():
             stage_4_setup()
 
     start_button.destroy()
-    blackout_timer = Timer(Blackout * 60, full_start)
-    blackout_timer.start()
+    gui.after(int(Blackout * 60 * 1000), full_start)
 
 
 # settings menu called on program start allows changing of max trials per stage, reinforcer delay,
