@@ -10,7 +10,18 @@
 \
 \ WIRING / EQUATES (must match the Hardware Config Utility mapping):
 \   ^VeriFEED  = Output 1  (MedOPERATE,  SG-716B Output 1, active-low)
-\   ^Delivered = Input  1  (MedINPUT, ENV-204 IR sentry, 20 ms pulse)
+\
+\ FEEDER: ENV-203-1000 (swapped in 2026-07-28, was ENV-204 VeriFEED).
+\ The ENV-203-1000 has no IR sentry, so this MSN blind-fires: it pulses
+\ the feeder and waits a fixed settle time in S7 instead of waiting for
+\ the ^Delivered input. Consequences:
+\   * P and V now count pellets COMMANDED (they used to count IR-verified).
+\   * X (empty-hopper timeouts) is dead -- with no IR pulse, an empty
+\     hopper is indistinguishable from a successful drop from the MSN's
+\     side. Detection has to move to the experimenter watching the box.
+\ To go back to VeriFEED semantics: put the ENV-204 back in, wire the IR
+\ sentry to Input 1, restore  ^Delivered = Input 1  and change S7 back
+\ to  #R^Delivered: ... / 80": ... (see git history for the prior body).
 \
 \ VARIABLES (all scalar reals; G is deliberately NOT used because MED-PC
 \            pre-dimensions G as an array[0..10] -- see DOC-301 App. D):
@@ -22,18 +33,17 @@
 \                                                      cmd=stop)
 \   D = BKGRND handshake flag 0/1  (MSN sets 0 before BKGRND, Pascal sets 1)
 \   C = pellets commanded so far this request
-\   P = pellets IR-verified this request
-\   V = pellets IR-verified this session (cumulative)
-\   X = empty-hopper timeouts this session (cumulative)
+\   P = pellets commanded this request       (was IR-verified; ENV-203-1000)
+\   V = pellets commanded this session       (was IR-verified; ENV-203-1000)
+\   X = unused on ENV-203-1000               (no way to detect empty hopper)
 \   T = elapsed seconds for the current request (BackProc2 -> elapsed_ms)
 \
 \ SHOW fields on the MED-PC screen:
-\   1 status text   2 verified(session)   3 last delivered
-\   4 empty-hopper errors   5 seq   6 requested
+\   1 status text   2 commanded(session)   3 last commanded
+\   4 unused (was empty-hopper errors)   5 seq   6 requested
 \ ===========================================================================
 
 ^VeriFEED  = 1
-^Delivered = 1
 
 
 S.S.1,        \ ---- request / dispense controller -----------------------
@@ -60,9 +70,12 @@ S5,           \ prime VeriFEED (active-low: ON drives the operate line low)
 S6,           \ release after 20 ms -- the dispense fires on the low->high
    0.02": OFF ^VeriFEED ---> S7
 
-S7,           \ wait for IR verification, or 80 s empty-hopper timeout
-   #R^Delivered: ADD P; ADD V; SHOW 2, Verified-sess, V ---> S4
-   80": ADD X; SHOW 4, Empty-hopper-errs, X ---> S8
+S7,           \ blind-fire settle: ENV-203-1000 has no IR sentry, so we
+              \ wait long enough for the pellet motor (~150-250 ms) to
+              \ finish its revolution and drop the pellet, then count it
+              \ as commanded. 300 ms leaves headroom without adding
+              \ noticeable latency to the training loop.
+   0.3": ADD P; ADD V; SHOW 2, Commanded-sess, V ---> S4
 
 S8,           \ emit the ack for this request via BackProc2
    0.01": SET D = 0; BKGRND 2 ---> S9
@@ -71,7 +84,7 @@ S9,           \ wait for BackProc2 to finish
    0.01": IF D = 1 [] ---> S10
 
 S10,          \ request complete: clear pending, back to idle polling
-   0.01": SET Q = 0; SHOW 3, Last-delivered, P ---> S1
+   0.01": SET Q = 0; SHOW 3, Last-commanded, P ---> S1
 
 
 S.S.2,        \ ---- session-end watcher --------------------------------
