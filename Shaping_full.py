@@ -752,7 +752,7 @@ with device:
     # gui initialization for main pig interface
     gui = tk.Tk()
     gui.configure(bg="black")
-    gui.configure(bg="black", cursor="arrow")
+    gui.configure(bg="black", cursor="none")
 
     # places start button
     start_button = tk.Button(gui, text="START", font=("bold", "40"), command=lambda: start())
