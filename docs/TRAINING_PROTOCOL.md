@@ -8,7 +8,7 @@
 |---|---|
 | Protocol version | 0.2 — **draft, not yet run on animals** |
 | Written | 2026-07-31 |
-| Last revised | 2026-07-31 — feeder changed ENV-204 → ENV-203-1000 (§0.1) |
+| Last revised | 2026-08-04 — §14.0 blocker closed; MSN blind-fire landed 2026-07-28 (§0.1, §9.2, §14.0) |
 | IACUC protocol # | `[SET LOCALLY]` |
 | Approved by | `[SET LOCALLY]` |
 
@@ -20,7 +20,9 @@ The consequence runs deeper than a part number. Under v0.1 the rig could confirm
 
 One upside: the rig now matches the published configuration exactly. Ao et al. used an ENV-203-1000 with the same 1 g Bio-Serv pellets, so their reported failure modes and mitigations apply directly rather than by analogy.
 
-> **Blocker.** `medpc/CoasterChase.mpc` still waits on the IR sentry and will hang 80 s per pellet until it is fixed. See §14.0 — **do not run an animal until that change is made and smoke-tested.**
+> **Blocker — resolved 2026-07-28** (commit `bbc6f87`). `medpc/CoasterChase.mpc` no longer waits on the IR sentry: state S7 now blind-fires with a 300 ms settle, so the 80 s-per-pellet stall is gone and the rig is runnable. Four documentation and naming follow-ups remain open (§14.0 items 5–8). None of them stall a session.
+>
+> *Why this section originally read as an open blocker:* this protocol was drafted on 2026-07-31 against a working copy that was two months behind `origin/main` and therefore did not contain the 2026-07-28 fix. Corrected 2026-08-04.
 
 ---
 
@@ -324,7 +326,7 @@ The ENV-203-1000 cannot tell you whether a pellet fell. Counting is the substitu
 
 1. Empty the receptacle completely.
 2. Count pellets loaded into the hopper, or top up to a **counted** reference level. Record it.
-3. **Prime and test:** trigger 5 dispenses with no animal present. Confirm 5 pellets in the receptacle, and listen to the cycle so you know what a normal one sounds like. Any shortfall here — fix before the pig comes in. `[VERIFY]` — record the normal cycle time for your unit; the paper's equivalent hardware ran ~0.5–1 s per pellet.
+3. **Prime and test:** trigger 5 dispenses with no animal present. Confirm 5 pellets in the receptacle, and listen to the cycle so you know what a normal one sounds like. Any shortfall here — fix before the pig comes in. Expect a fast cycle: the ENV-203-1000 motor completes its revolution in ~150–250 ms, the MSN allows a 300 ms settle (§14.0), and bench validation on this rig measured p99 = 390 ms end-to-end over 100 requests. The ~0.5–1 s figure quoted for the paper's hardware does **not** apply to this feeder. `[VERIFY]` — confirm your own unit lands in that range and record it.
 4. Clear those 5 pellets out before starting.
 
 **After the session**
@@ -441,11 +443,13 @@ Recorded so that later analyses and any publication can state them accurately.
 
 ## 14. Software readiness — resolve before data collection
 
-**§14.0 is a hard blocker introduced by the feeder change and must be fixed before any session, animal or otherwise.** The remaining items were found by reading `Shaping_full.py` against this protocol; 14.1 and 14.3 block clean data collection but not pilot shaping.
+**§14.0 was a hard blocker introduced by the feeder change. The blocking half shipped on 2026-07-28 and the rig is runnable again**; what remains there is naming and documentation debt that misleads the next reader but stalls nothing. The other sections were found by reading `Shaping_full.py` against this protocol; 14.1 and 14.3 block clean data collection but not pilot shaping.
 
-### 14.0 — BLOCKER: the MSN still waits on the removed IR sentry
+### 14.0 — RESOLVED 2026-07-28: the MSN no longer waits on the removed IR sentry
 
-`medpc/CoasterChase.mpc` state S7 blocks on the ENV-204's sentry pulse:
+**Status: the blocking half is fixed and bench-validated. Items 5–8 below are still open, and none of them stall a session.**
+
+`medpc/CoasterChase.mpc` state S7 *used to* block on the ENV-204's sentry pulse:
 
 ```
 S7,           \ wait for IR verification, or 80 s empty-hopper timeout
@@ -453,30 +457,36 @@ S7,           \ wait for IR verification, or 80 s empty-hopper timeout
    80": ADD X; SHOW 4, Empty-hopper-errs, X ---> S8
 ```
 
-With nothing wired to Input 1, `#R^Delivered` never fires. **Every dispense request stalls in S7 for 80 seconds**, then takes the timeout branch: increments the empty-hopper counter, abandons any remaining pellets in the request, and leaves `Verified-sess = 0` and `Last-delivered = 0`. Downstream, `iointerface_api.py:262` sets `last_empty_hopper = True`, so `Shaping_full.py:198` prints `*** CHECK FEEDER ***` on every reinforcement. The rig is unrunnable in this state.
+With nothing wired to Input 1, `#R^Delivered` never fired, so every dispense request stalled in S7 for the full 80 s and then took the timeout branch — miscounting a normal dispense as an empty-hopper error. Commit `bbc6f87` replaced that with a blind-fire settle:
 
-**Required changes**
+```
+S7,           \ blind-fire settle: ENV-203-1000 has no IR sentry, so we
+              \ wait long enough for the pellet motor (~150-250 ms) to
+              \ finish its revolution and drop the pellet, then count it
+              \ as commanded. 300 ms leaves headroom without adding
+              \ noticeable latency to the training loop.
+   0.3": ADD P; ADD V; SHOW 2, Commanded-sess, V ---> S4
+```
 
-1. **`medpc/CoasterChase.mpc`** — replace the S7 wait with a fixed settle delay sized to the ENV-203-1000's cycle time (`[VERIFY]` on your unit; start from ~1 s), and count *commanded* pellets:
+Validated on the COM-106 before merge: `heartbeat_check.py` ALIVE; `python_smoke.py` 2/2 ok; `python_latency.py` 100/100 ok, p99 = 390 ms against a 1500 ms budget; `python_soak.py` 39/39 ok, drift 1.02×, 0 backlog.
 
-   ```
-   S7,           \ settle for one dispense cycle -- no delivery sensor on this feeder
-      1": ADD P; ADD V; SHOW 2, Commanded-sess, V ---> S4
-   ```
+**Done**
 
-   Note this removes the only path that ever incremented `X`. Either retire the empty-hopper counter or leave it permanently zero — do not leave a counter on the MED-PC screen that reads "0 errors" when errors are simply undetectable.
+1. ✅ **`medpc/CoasterChase.mpc` S7** — replaced with a fixed settle counting *commanded* pellets. Note the shipped settle is **300 ms**, not the ~1 s this section originally proposed: the ENV-203-1000 motor is faster than the paper's hardware. §9.2 step 3 carries the corrected figure.
+2. ✅ **`X`, the empty-hopper counter** — retired in place. It is documented dead in the MSN header and `SHOW 4` is relabelled "unused", so the MED-PC screen no longer shows a counter reading "0 errors" when errors are undetectable.
+3. ✅ **Header comments and SHOW labels** — rewritten. The `^Delivered` equate is dropped, `P`/`V` are documented as "commanded", and the screen fields are now `Commanded-sess` and `Last-commanded`.
+4. ✅ **`medpc/smoke_test/python_empty_hopper.py`** — deleted (commit `5669acd`). Its replacement is the 5-pellet prime test in §9.2, run manually.
 
-2. **Header comments, lines 12–13, 25–27, 31–32** — `^Delivered`/Input 1 no longer exists; `P`/`V` become "commanded", not "IR-verified". Retire `X`.
+**Still open** — naming and documentation only; safe to run an animal with these outstanding, provided §9.2 reconciliation is being done.
 
-3. **`iointerface_api.py`** — `pellets_delivered_total` and `last_empty_hopper` now report commanded counts and a flag that can never be true. Rename or clearly comment them; a variable called `pellets_delivered_total` that cannot observe delivery is a trap for the next person.
+5. ⬜ **`iointerface_api.py`** — untouched by the fix. `pellets_delivered_total` (line 127) and `last_empty_hopper` (line 133, assigned at line 262) still carry VeriFEED names for values that can no longer observe delivery. Rename or clearly comment them; a variable called `pellets_delivered_total` that cannot observe delivery is a trap for the next person. The module docstrings at lines 6, 77 and 83 still describe the ENV-204.
+6. ⬜ **`Shaping_full.py:172, 177, 192`** — comments still describe an "IR-verified dispense" and the "IR-verification payoff"; line 24 still names the ENV-204 feeder.
 
-4. **`Shaping_full.py:172, 177, 192`** — comments still describe "IR-verified dispense" and the "IR-verification payoff". The `*** CHECK FEEDER ***` branch on line 198 can no longer fire on a real fault; either remove it or repoint it at something real.
+   **The `*** CHECK FEEDER ***` branch on line 198 has inverted rather than disappeared.** `medpc/BACKPROC.PAS:217` sets `status = 'ok'` whenever delivered ≥ requested, and blind-fire makes those two always equal — so `last_empty_hopper` is now permanently false and the warning can **never** fire. Before the fix it fired on *every* reinforcement. Either delete the branch or repoint it at something real; leaving it in place advertises a delivery check that does not exist.
+7. ⬜ **`medpc/MED-PC_DEPLOYMENT.md` line 97** — Hardware Config Utility mapping still assigns Input 1 to `^Delivered`. (Line 96, Output 1 → `^VeriFEED`, is still correct and must stay — `^VeriFEED` remains the operate-line label on the ENV-203-1000.)
+8. ⬜ **`medpc/smoke_test/python_latency.py:14-15`** — header still paces requests around "the feeder + IR sentry" and an ENV-204 cycle time of ~0.5–1 s.
 
-5. **`medpc/smoke_test/python_empty_hopper.py`** — tests a path that no longer exists. Retire it, and replace it with the 5-pellet prime test from §9.2 as a manual procedure.
-
-6. **`medpc/MED-PC_DEPLOYMENT.md` §96** — Hardware Config Utility mapping still assigns Input 1 to `^Delivered`.
-
-**Verify before running an animal:** 20 consecutive dispenses at the target rate with no 80 s stalls, `Last-delivered` matching the request, and 20 pellets physically counted in the receptacle.
+**Verify before running an animal:** 20 consecutive dispenses at the target rate with no stalls, `Last-commanded` matching the request, and 20 pellets physically counted in the receptacle.
 
 ### 14.1 Stage 3 draws X and Y independently — `Shaping_full.py:390-391`
 
@@ -499,7 +509,7 @@ The comment says "Button now moves horizontally," but placement is hardcoded (`r
 
 ### 14.3 The Phase C discrimination program does not exist
 
-Nothing in `Programs/` implements two-choice discrimination. To satisfy §8 it must provide: a center start button gating choice onset; pseudorandom L/R assignment with a same-side run cap; a correction-trial mode that re-presents the failed trial with the incorrect option inactive; separate logging of first-presentation vs. correction trials; and per-session first-presentation accuracy plus left-choice percentage. Reuse `iointerface_api.py` and `reinforcement()` so the feeder path stays common — but note §14.0 item 3: those now report *commanded* pellets, so do not build a delivery check on them.
+Nothing in `Programs/` implements two-choice discrimination. To satisfy §8 it must provide: a center start button gating choice onset; pseudorandom L/R assignment with a same-side run cap; a correction-trial mode that re-presents the failed trial with the incorrect option inactive; separate logging of first-presentation vs. correction trials; and per-session first-presentation accuracy plus left-choice percentage. Reuse `iointerface_api.py` and `reinforcement()` so the feeder path stays common — but note §14.0 item 5: those now report *commanded* pellets, so do not build a delivery check on them.
 
 ### 14.4 Minor — typo'd global, `Shaping_full.py:136`
 
