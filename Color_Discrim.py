@@ -28,6 +28,7 @@ import time
 import random
 from pathlib import Path
 from time import perf_counter
+from threading import Timer
 
 from iointerface_api import *
 from platform_config import play_sound, ensure_sound_files
@@ -42,7 +43,7 @@ ensure_sound_files()
 scan_time = 1
 print(f"Scanning for {scan_time} seconds, please wait...")
 
-USE_MEDPC = sys.platform == "darwin"
+USE_MEDPC = sys.platform == "win32"
 
 devices = IOInterface.discover_interfaces(
     timeout=scan_time,
@@ -115,24 +116,28 @@ def reinforcement():
     """Dispense pellets and play the success sound."""
 
     global pellets_dispensed
+    global ReinfAmt
+    reinforcers = 0
 
-    for _ in range(int(ReinfAmt)):
+    def reinfOff():
+        # Success sound.
+        play_sound("2900.short.wav")
+        device.write_output(1, IOState.INACTIVE)
+        device.write_output(2, IOState.INACTIVE)
+
+    while True:
         # Output 1 = pellet dispenser
         # Output 2 = sonalert/success signal
         device.write_output(1, IOState.ACTIVE)
         device.write_output(2, IOState.ACTIVE)
-
-        time.sleep(0.25)
-
-        device.write_output(1, IOState.INACTIVE)
-        device.write_output(2, IOState.INACTIVE)
+        pellet_timer = Timer(0.15, reinfOff)
+        pellet_timer.start()
+        pellet_timer.join()
 
         pellets_dispensed += 1
-
-    # Success sound.
-    play_sound("2900.short.wav")
-
-
+        reinforcers += 1
+        if reinforcers >= ReinfAmt:
+            break
 # ---------------------------------------------------------------------------
 # DISPLAY
 # ---------------------------------------------------------------------------
@@ -856,4 +861,5 @@ def build_settings():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    build_settings()
+    with device:
+        build_settings()
