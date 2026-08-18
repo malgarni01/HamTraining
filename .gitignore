@@ -16,8 +16,16 @@ venv/
 # Data and docs (excluded by design)
 Data/
 *.md
+
+# Unpublished research writing stays off the remote entirely.
+# docs/ holds the training protocol and the draft Methods section;
+# manuals/ holds the rendered PDFs of the same documents.
+# Note: a .gitignore only stops FUTURE tracking -- it does not remove
+# anything already committed. See the repo history purge, 2026-08-17.
+docs/
+manuals/
+
 # ...but keep the project docs that ship with the repo
-!docs/*.md
 !medpc/*.md
 !README.md
 License_CC-BY-NC_4.0.txt
