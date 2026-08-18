@@ -25,7 +25,8 @@ print(f"scanning for {scan_time} seconds, please wait...")
 # MED-PC's file-drop backend; elsewhere fall back to Mock/serial. The MED-PC
 # backend itself falls back to MockDevice if C:\MED-PC is not present, so a
 # plain Windows dev box still runs without stalling on dispense acks.
-USE_MEDPC = sys.platform == "win32"
+# USE_MEDPC = sys.platform == "win32"
+USE_MEDPC = sys.platform == "darwin"
 devices = IOInterface.discover_interfaces(timeout=scan_time,
                                           use_medpc=USE_MEDPC)
 for device in devices:

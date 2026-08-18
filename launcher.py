@@ -58,6 +58,21 @@ TASKS = [
             "If it crashes, call the lab tech.",
         ],
     ),
+    (
+        "Color Discrimination Task",
+        "Color_Discrim.py",
+        [
+            "Touchscreen yellow-choice training task.",
+            "One yellow section and remaining blue sections.",
+            "Correct yellow touches earn reinforcement according to FR.",
+            "Incorrect blue touches are recorded.",
+            "",
+            "Before starting:",
+            "  - Make sure the touchscreen is responsive",
+            "  - Make sure the pellet feeder is connected",
+            "  - Make sure the success sound is available",
+        ],
+    ),
 ]
 
 
