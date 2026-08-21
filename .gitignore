@@ -17,7 +17,7 @@ Data/
 *.md
 docs/
 manuals/
+medpc/smoke_test/
 
-!medpc/*.md
 !README.md
 License_CC-BY-NC_4.0.txt
