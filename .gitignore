@@ -13,6 +13,11 @@ venv/
 .claude/
 .idea/
 
+# Local-only test harness. Deliberately never pushed: it stubs Tk, IO and
+# audio to drive the task state machines headlessly, and is maintained on
+# the rig machine rather than shared. Run with: python3 tests/test_discrim.py
+tests/
+
 # Data and docs (excluded by design)
 Data/
 *.md
