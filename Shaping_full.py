@@ -42,6 +42,12 @@ position_list = [(0.4, 0.0), (0.7, 0.3), (1, 0.55)]  # stage 3 button position l
 new_pos_list = [(0.25, 0.25), (0.25, 0.75), (0.75, 0.25), (0.75, 0.75), (0.5, 0.5)]  # stage 4 button position list
 btn_size = 0.7  # button size constant
 fr_req = 1  # fixed ratio requirement
+FLASH_MS = 60  # dwell time for every flash, in ms. Without an explicit hold the
+               # label was placed and removed inside one event-loop pass, so
+               # nothing was actually shown to the animal.
+NEUTRAL_FLASH_BG = "gray50"  # sub-criterion touch acknowledgement. Must be identical
+                             # for correct and incorrect touches, and distinct from
+                             # both yellow (target) and black (background).
 color_on = 0    #to flag color change on buttons
 
 # Global Counters
@@ -100,10 +106,53 @@ ReinfAmt = 1
 # y = new_pos_list[]-0.5*btn_size*5/4
 
 
+# flash helpers
+
+
+def _hold(ms):
+    """Keep a flash on screen for a fixed time.
+
+    time.sleep is the house idiom in this file, and press()/incorrect() are Tk
+    event handlers -- nothing else needs to run during a 60 ms flash. Without
+    this the label was placed and removed within a single pass of the event
+    loop, i.e. for less than one 60 Hz frame, so no flash was actually drawn.
+    """
+    gui.update()
+    time.sleep(ms / 1000.0)
+
+
+def neutral_flash():
+    """Acknowledge a sub-criterion touch without revealing correctness.
+
+    Full screen, one colour, identical whichever region was touched. The old
+    per-touch feedback differed by button -- yellow-on-black for the target,
+    all-black for off-target -- which handed the pig the answer on touch 1 of
+    an FR-3, so the ratio measured nothing. Sound is withheld entirely until
+    the ratio completes.
+
+    The overlay is full screen on purpose: flashing only the touched region
+    would still differ by button, since resp_btn is a small rectangle while
+    inc_btn covers the whole screen. The geometry alone would carry the signal.
+    """
+    lbl = tk.Label(gui, bg=NEUTRAL_FLASH_BG, activebackground=NEUTRAL_FLASH_BG)
+    lbl.place(relheight=1.1, relwidth=1.1, relx=1.05, rely=-0.05, anchor="ne")
+    _hold(FLASH_MS)
+    lbl.place_forget()
+    gui.update()
+
+
 # press function handles correct button presses
 
 def press(var):
     global response, size_adj_correct, fr_resp, inc_resp
+
+    # Count first and gate immediately. Everything below this point -- tone and
+    # differential flash alike -- is the reinforced-response signal and must not
+    # fire until the fixed ratio is complete.
+    fr_resp += 1
+    if fr_resp < fr_req:
+        neutral_flash()  # touch registered; correctness withheld
+        return
 
     # flashes the background yellow
     lbl = tk.Label(gui, bg="yellow", activebackground="yellow")
@@ -112,50 +161,55 @@ def press(var):
     inc_lbl.place(relheight=1.1, relwidth=1.1, relx=1.05, rely=-0.05, anchor="ne")
     lbl.place(relx=pos["relx"], rely=pos["rely"], relwidth=pos["relwidth"], relheight=pos["relheight"],
               anchor=pos["anchor"])
-    gui.update()
     play_sound('2900.short.wav') # play tone for response
+    _hold(FLASH_MS)              # tone and flash coincide
     lbl.place_forget()
     inc_lbl.place_forget()
     gui.update()
 
-    # this block handles the fixed ratio response (need a certain number of responses per reinforce/punishment)
-    fr_resp += 1
-    if fr_resp >= fr_req:
-        inc_btn.place_forget()
-        resp_btn.place_forget()
-        gui.update()
-        response = var
-        fr_resp = 0
-        inc_resp = 0
-        if stage_4_start_time > 0:
-            size_adj_correct[size_adj_trials - 1] = 1
+    inc_btn.place_forget()
+    resp_btn.place_forget()
+    gui.update()
+    response = var
+    fr_resp = 0
+    inc_resp = 0
+    if stage_4_start_time > 0:
+        size_adj_correct[size_adj_trials - 1] = 1
 
 
 # incorrect function handles incorrect button presses
 
 def incorrect(var):
-    global inc, size_adj_correct, response, inc_resp, fr_rsp
+    # fr_resp, not fr_rsp: the old name was a typo, so the reset below bound a
+    # local and the global partial count on the target was never cleared.
+    global inc, size_adj_correct, response, inc_resp, fr_resp
+
+    # Count first and gate immediately -- see press(). An off-target touch that
+    # does not complete the ratio must be indistinguishable from an on-target
+    # one that does not complete the ratio.
+    inc_resp += 1
+    if inc_resp < fr_req:
+        neutral_flash()  # touch registered; correctness withheld
+        return
+
     # flash background back
     inc_lbl = tk.Label(gui, bg="black", activebackground="black")
     pos = inc_btn.place_info()
     inc_lbl.place(relx=pos["relx"], rely=pos["rely"], relwidth=pos["relwidth"], relheight=pos["relheight"],
                   anchor=pos["anchor"])
-    gui.update()
     play_sound('290.short.wav') # play tone for response
+    _hold(FLASH_MS)             # tone and flash coincide
     inc_lbl.place_forget()
     gui.update()
 
-    # this block handles the fixed ratio response (need a certain number of responses per reinforce/punishment)
-    inc_resp += 1
-    if inc_resp >= fr_req:
-        fr_resp = 0
-        inc_resp = 0
-        inc = var
-        resp_btn.place_forget()
-        inc_btn.place_forget()
-        gui.update()
-        response = 0
-        size_adj_correct[size_adj_trials - 1] = 0
+    fr_resp = 0
+    inc_resp = 0
+    inc = var
+    resp_btn.place_forget()
+    inc_btn.place_forget()
+    gui.update()
+    response = 0
+    size_adj_correct[size_adj_trials - 1] = 0
 
 
 # Basic reinforcement/punishment function
@@ -212,8 +266,9 @@ def reinforcement():
 # Autoshape: Setting for autoshape delivery, change to either 0 or 1 - autoshape will deliver a pellet after illumination. Disable for hand-shaping.
 
 def stage_0_setup():
-    global trial, stage_0_start_time
+    global trial, stage_0_start_time, fr_resp
     trial += 1
+    fr_resp = 0  # a partial ratio must not carry into the next trial
     print("trial started - stage 0")
     stage_0_start_time = perf_counter() #start timer
     resp_btn.config(bg="black")
@@ -286,9 +341,10 @@ def stage_0():
 # Stage 1: Same as stage 0, except only presses when the screen illuminated result in pellet delivery
 
 def stage_1_setup():
-    global trial, stage_1_start_time
+    global trial, stage_1_start_time, fr_resp
     time.sleep(random.choice(VI_list)) # pause for a random amount of time chosen from the VI_list array
     trial += 1
+    fr_resp = 0  # a partial ratio must not carry into the next trial
     play_sound('7500.long.wav') # long tone signals start
     stage_1_start_time = perf_counter()
 
@@ -334,9 +390,10 @@ def stage_1():
 # Stage 2: Button now moves horizontally but full screen width. Same size button every trial
 
 def stage_2_setup():
-    global trial, stage_2_start_time
+    global trial, stage_2_start_time, fr_resp
     time.sleep(random.choice(VI_list)) # pause for a random amount of time chosen from the VI_list array
     trial += 1
+    fr_resp = 0  # a partial ratio must not carry into the next trial
     play_sound('7500.long.wav') # play long tone for trial start
     stage_2_start_time = perf_counter()
 
@@ -561,11 +618,13 @@ def settings():
     # gets current values for all variables listed below
     def update_vals():
         global DelivTimer, LimitedHold, Stage0Resp, Stage1Resp, Stage2Resp, Stage3Resp, \
-            Stage4Resp, StartStage, Blackout, Autoshape
+            Stage4Resp, StartStage, Blackout, Autoshape, fr_req
         DelivTimer = float(e4.get())
         LimitedHold = float(e5.get())
         Blackout = float(e6.get())
-        fr_req = float(e9.get())
+        # int, and never below 1: a fractional ratio is meaningless and a zero
+        # or negative one would make the gate always true.
+        fr_req = max(1, int(float(e9.get())))
         Stage0Resp = float(e0.get())
         Stage1Resp = float(e1.get())
         Stage2Resp = float(e2.get())
