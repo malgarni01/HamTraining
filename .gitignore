@@ -13,24 +13,11 @@ venv/
 .claude/
 .idea/
 
-# Local-only test harness. Deliberately never pushed: it stubs Tk, IO and
-# audio to drive the task state machines headlessly, and is maintained on
-# the rig machine rather than shared. Run with: python3 tests/test_discrim.py
-tests/
-
-# Data and docs (excluded by design)
 Data/
 *.md
-
-# Unpublished research writing stays off the remote entirely.
-# docs/ holds the training protocol and the draft Methods section;
-# manuals/ holds the rendered PDFs of the same documents.
-# Note: a .gitignore only stops FUTURE tracking -- it does not remove
-# anything already committed. See the repo history purge, 2026-08-17.
 docs/
 manuals/
 
-# ...but keep the project docs that ship with the repo
 !medpc/*.md
 !README.md
 License_CC-BY-NC_4.0.txt
