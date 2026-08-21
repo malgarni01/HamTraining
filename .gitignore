@@ -13,7 +13,6 @@ venv/
 .claude/
 .idea/
 
-# Data and docs
 Data/
 *.md
 docs/
