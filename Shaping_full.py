@@ -25,8 +25,11 @@ print(f"scanning for {scan_time} seconds, please wait...")
 # MED-PC's file-drop backend; elsewhere fall back to Mock/serial. The MED-PC
 # backend itself falls back to MockDevice if C:\MED-PC is not present, so a
 # plain Windows dev box still runs without stalling on dispense acks.
-# USE_MEDPC = sys.platform == "win32"
-USE_MEDPC = sys.platform == "darwin"
+# Do not flip this to "darwin" to exercise the MED-PC path on a Mac. It is
+# committed code: on the Windows rig the comparison is then False, discovery
+# falls through to MockDevice, and the session logs pellets as commanded while
+# the feeder dispenses nothing. There is no delivery verification to catch it.
+USE_MEDPC = sys.platform == "win32"
 devices = IOInterface.discover_interfaces(timeout=scan_time,
                                           use_medpc=USE_MEDPC)
 for device in devices:
