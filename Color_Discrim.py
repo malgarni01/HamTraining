@@ -1,19 +1,10 @@
-#Software is provided and licensed under the CC-BY-NC 4.0 license: https://creativecommons.org/licenses/by-nc/4.0/.
-#This means that you can use, adapt, and share so long as you provide attribution.
-#However, commercial uses are not permitted.
-#This software was developed by Dr. Vonder Haar. Please attribute to him and provide a citation to published work or this GitHub, as appropriate.
-#For commercial use, please contact Dr. Vonder Haar for licensing options. Generally, use for small-scale research will be made free of charge.
-
-"""Phase C -- two-choice color discrimination for the CoasterChase pig rig.
+"""Two-choice color discrimination for the CoasterChase pig rig.
 
 Implements the discrimination procedure described in:
 
     Ao W, Grace M, Floyd CL, Vonder Haar C. A Touchscreen Device for
     Behavioral Testing in Pigs. Biomedicines. 2022;10(10):2612.
     doi:10.3390/biomedicines10102612
-
-and specified locally in docs/TRAINING_PROTOCOL.md section 8 (trial
-structure, side-bias monitoring) and section 14.3 (software requirements).
 
 Three phases, selected by the experimenter at session start:
 
@@ -26,37 +17,11 @@ Three phases, selected by the experimenter at session start:
 
 Shaping (Shaping_full.py) is Phase A/B and is a separate program; this file
 does not import from it. The feeder path is shared via iointerface_api.
-
-FILE HISTORY. Color_Discrim.py previously held a simpler simultaneous
-discrimination: the screen was split into two or four sections, one yellow
-among blue, and any touch ended the trial. That version is preserved in git
-history. It was replaced rather than extended because every element that
-distinguished it -- section geometry, free-running trials, and above all its
-reading of fr_req -- had to change:
-
-  * fr_req meant a REINFORCEMENT SCHEDULE ACROSS TRIALS there (reinforce every
-    Nth correct choice). Here, as in Shaping_full.py, it is a RESPONSE
-    REQUIREMENT WITHIN A TRIAL (n touches on one button to commit that
-    choice), and every correct choice is reinforced. Same name, same settings
-    label, opposite manipulation -- the reason the two could not coexist.
-  * There was no trial initiation, no limited hold and therefore no omissions,
-    no correction trials, no conditional discrimination, no side-bias cap and
-    no subject identifier in the data.
-
-The 2/4-section layout is not carried over: the procedure is two centred
-choice boxes throughout, per Ao et al. and protocol section 8.1.
-
-NOTE ON DELIVERY VERIFICATION: the ENV-203-1000 has no IR sentry. The MSN
-blind-fires and counts pellets *commanded*, not delivered (see
-medpc/CoasterChase.mpc S7 and TRAINING_PROTOCOL.md section 14.0). This
-program logs commanded pellets only and deliberately makes no delivery
-check -- such a check could never fire. Reconciliation is manual, per
-TRAINING_PROTOCOL.md section 9.2.
 """
 
 from tkinter import *
 import tkinter as tk  # for GUI
-from time import perf_counter  # for calculating latencies/timers
+from time import perf_counter, sleep  # latencies/timers, and flash dwell
 import csv
 import datetime
 import os
@@ -90,8 +55,14 @@ VI_list = [3, 4, 4, 5, 5, 5, 6, 6, 7]  # variable interval ITI, seconds (protoco
 MAX_SAME_SIDE = 3  # pseudorandom cap: never more than this many same-side trials in a row
 
 # Screen geometry, relative units. Choices sit left and right of centre.
+FLASH_MS = 60                # dwell for a touch-acknowledgement flash, ms
+NEUTRAL_FLASH_BG = "gray50"  # identical for every sub-criterion touch, and
+                             # distinct from the choice colours
+
 CENTRE_POS = (0.5, 0.5)
-CENTRE_SIZE = (0.20, 0.30)  # relwidth, relheight
+CENTRE_SIZE = (0.40, 0.45)  # relwidth, relheight. Matches the stage 3 box in
+                            # Shaping_full.py (relwidth 0.4, relheight 0.45) so the
+                            # start target is the same size the animal was shaped on.
 CHOICE_POS = {"L": (0.22, 0.5), "R": (0.78, 0.5)}
 CHOICE_SIZE = (0.28, 0.45)
 
@@ -288,6 +259,31 @@ def reinforcement():
 # The ITI in particular is scheduled rather than time.sleep()'d, so the
 # display stays live and the quit button still works between trials.
 
+def _hold(ms):
+    """Keep a flash on screen for a fixed time.
+
+    These are Tk event handlers, so blocking briefly is safe -- nothing else
+    needs to run during a 60 ms flash. Without an explicit hold the label is
+    placed and removed inside one pass of the event loop and never renders.
+    """
+    gui.update()
+    sleep(ms / 1000.0)
+
+
+def neutral_flash():
+    """Acknowledge a touch that did not complete the fixed ratio.
+
+    Full screen, one colour, identical wherever the animal touched, and
+    SILENT. Matches Shaping_full.py so that a sub-criterion touch means the
+    same thing to the animal in both tasks.
+    """
+    lbl = tk.Label(gui, bg=NEUTRAL_FLASH_BG, activebackground=NEUTRAL_FLASH_BG)
+    lbl.place(relheight=1.1, relwidth=1.1, relx=1.05, rely=-0.05, anchor="ne")
+    _hold(FLASH_MS)
+    lbl.place_forget()
+    gui.update()
+
+
 def paint_color(widget, color):
     """Set a frame's background so that it actually repaints.
 
@@ -392,9 +388,13 @@ def centre_pressed(_event=None):
     if awaiting != "centre":
         return
 
-    play_sound('2900.short.wav')
+    # Count first, gate immediately. No tone here at any point: trial start is
+    # already marked by 7500.long.wav, and sounding 2900 -- the reinforcement
+    # tone -- for merely starting a trial devalues it as a signal. The choices
+    # appearing is the feedback for a completed centre ratio.
     fr_count["centre"] += 1
     if fr_count["centre"] < FRCentre:
+        neutral_flash()
         return
 
     cancel_timeout()
@@ -434,11 +434,17 @@ def choice_pressed(side):
     fr_count[other] = 0
 
     if fr_count[side] < FRChoice:
-        # Sub-criterion presses get a NEUTRAL touch tone, identical on both
-        # buttons. Using the correct/incorrect tones here would tell the pig
-        # the answer before the choice is committed -- a real confound once
-        # FRChoice > 1, which is exactly the C3 case.
-        play_sound('2900.short.wav')
+        # Sub-criterion presses are SILENT, with a neutral flash identical on
+        # both buttons. Two separate reasons:
+        #   - the correct/incorrect tones here would tell the pig the answer
+        #     before the choice is committed, a confound once FRChoice > 1,
+        #     which is exactly the C3 case;
+        #   - 2900.short.wav is the reinforcement tone. Sounding it on touches
+        #     that earn nothing -- including touches on the WRONG button --
+        #     devalues it as a conditioned reinforcer. An earlier version
+        #     played it here and called it neutral; it is identical on both
+        #     buttons, but it is not neutral with respect to reward.
+        neutral_flash()
         return
 
     cancel_timeout()
