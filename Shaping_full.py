@@ -11,10 +11,12 @@ from threading import Timer  # for periodic loops
 import random  # for random number selection
 from time import perf_counter  # for calculating latencies/timers
 import time
+import csv
+import datetime
 import os
 import sys
 from iointerface_api import *
-from platform_config import play_sound, ensure_sound_files
+from platform_config import play_sound, ensure_sound_files, get_data_dir
 
 ensure_sound_files()
 
@@ -86,7 +88,18 @@ stage_4_responses = 0
 stage_4_omissions = 0
 stage_4_incorrects = 0
 
+# Data logging state (read-only view of the session; see "Data logging" below)
+records = []            # per-trial dicts, also written to CSV as we go
+press_time = 0.0        # perf_counter() at the touch that completed the ratio
+box_geometry = {}       # resp_btn placement for the current trial
+pellets_commanded = 0   # running total of pellets requested this session
+
+shutting_down = False   # set once the session is over; makes the exit path
+                        # idempotent and stops any stage from scheduling
+                        # another trial behind the summary
+
 # Default Settings (Can be modified)
+Subject = "Sbj000"
 Autoshape = 1  # if this variable is set to 1, goes to autoshaping for stage 0, otherwise does keyboard hand shaping
 DelivTimer = 30  # stage 0 and stage 2 timeout value for timer
 LimitedHold = 25	#Time which animal has to respond
@@ -99,6 +112,8 @@ MaxTrial = 100
 StartStage = 0
 Blackout = 0.15  # timer in min
 ReinfAmt = 1
+ShowCursor = 0  # 0 = mouse pointer hidden over the task window (default);
+                # 1 = visible, for mouse-driven testing without a touchscreen
 
 
 # btn_size = local variable modified in loop
@@ -147,7 +162,7 @@ def neutral_flash():
 # press function handles correct button presses
 
 def press(var):
-    global response, size_adj_correct, fr_resp, inc_resp
+    global response, size_adj_correct, fr_resp, inc_resp, press_time
 
     # Count first and gate immediately. Everything below this point -- tone and
     # differential flash alike -- is the reinforced-response signal and must not
@@ -156,6 +171,8 @@ def press(var):
     if fr_resp < fr_req:
         neutral_flash()  # touch registered; correctness withheld
         return
+
+    press_time = perf_counter()  # for the CSV latency; timed before the flash
 
     # flashes the background yellow
     lbl = tk.Label(gui, bg="yellow", activebackground="yellow")
@@ -185,7 +202,7 @@ def press(var):
 def incorrect(var):
     # fr_resp, not fr_rsp: the old name was a typo, so the reset below bound a
     # local and the global partial count on the target was never cleared.
-    global inc, size_adj_correct, response, inc_resp, fr_resp
+    global inc, size_adj_correct, response, inc_resp, fr_resp, press_time
 
     # Count first and gate immediately -- see press(). An off-target touch that
     # does not complete the ratio must be indistinguishable from an on-target
@@ -194,6 +211,8 @@ def incorrect(var):
     if inc_resp < fr_req:
         neutral_flash()  # touch registered; correctness withheld
         return
+
+    press_time = perf_counter()  # for the CSV latency; timed before the flash
 
     # flash background back
     inc_lbl = tk.Label(gui, bg="black", activebackground="black")
@@ -218,7 +237,7 @@ def incorrect(var):
 # Basic reinforcement/punishment function
 
 def reinforcement():
-    global response
+    global response, pellets_commanded
     response = 0
     reinforcers = 0
 
@@ -247,6 +266,8 @@ def reinforcement():
         if reinforcers >= ReinfAmt:
             break
 
+    pellets_commanded += reinforcers
+
     # Per-trial IR-verification log (MED-PC backend only).
     if _delivered_before is not None:
         requested = int(ReinfAmt)
@@ -261,6 +282,118 @@ def reinforcement():
                   f"delivered={delivered} status={status}")
 
 
+# ---------------------------------------------------------------------------
+# Data logging
+#
+# Same layout as Color_Discrim.py: one row per trial is appended to
+# Data/<Subject>_shaping.csv as the session runs, and one summary row per
+# session to Data/<Subject>_shaping_sessions.csv when the session is exited.
+# These functions only read program state; they do not change the task.
+#
+# Outcome values:
+#   response   reinforced touch on the box (stages 0-3)
+#   correct    touch on the box (stage 4)
+#   incorrect  touch off the box (stage 4)
+#   omission   no response before the timer ran out (stages 2-4; stage 2
+#              uses DelivTimer, stages 3-4 use LimitedHold)
+#   autoshape  stage 0 pellet delivered by the autoshape timer
+#   handshape  pellet delivered from the keyboard (Ctrl+R, stages 0-1)
+# Latency is from box onset to the touch that completed the FR requirement,
+# and is blank for rows with no touch.
+# BoxRelX/BoxRelY are the box's top-right corner (resp_btn uses anchor="ne"),
+# as fractions of the screen; BoxRelWidth/BoxRelHeight are its size.
+
+def trial_csv_path():
+    return os.path.join(get_data_dir(), f"{Subject}_shaping.csv")
+
+
+def session_csv_path():
+    return os.path.join(get_data_dir(), f"{Subject}_shaping_sessions.csv")
+
+
+TRIAL_COLUMNS = ["Subject", "Date", "Stage", "Trial", "Outcome", "Latency",
+                 "BoxColor", "BoxRelX", "BoxRelY", "BoxRelWidth",
+                 "BoxRelHeight", "PelletsCommanded"]
+
+SESSION_COLUMNS = ["Subject", "Date", "StartStage", "LastStage", "Autoshape",
+                   "FRRequirement", "TrialsStarted",
+                   "Stage0Responses", "Stage0Autoshaped", "Stage0HandShaped",
+                   "Stage1Responses", "Stage1HandShaped",
+                   "Stage2Responses", "Stage2Omissions",
+                   "Stage3Responses", "Stage3Omissions",
+                   "Stage4Correct", "Stage4Incorrect", "Stage4Omissions",
+                   "FinalButtonSize", "PelletsCommanded"]
+
+
+def append_csv(path, columns, row):
+    """Append one row, writing the header if the file is new."""
+    new_file = not os.path.isfile(path)
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        if new_file:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def snapshot_box():
+    """Remember where resp_btn was placed this trial. Taken at setup because
+    the loops call place_forget() before a trial is recorded."""
+    global box_geometry
+    box_geometry = resp_btn.place_info()
+
+
+def record(stage, outcome, start_time=None):
+    """Build, store and persist one trial record. Pass start_time for rows
+    that end in a touch, so latency can be computed from press_time."""
+    latency = press_time - start_time if start_time is not None else None
+    row = {
+        "Subject": Subject,
+        "Date": datetime.datetime.now().isoformat(timespec="seconds"),
+        "Stage": stage,
+        "Trial": trial,
+        "Outcome": outcome,
+        "Latency": round(latency, 3) if latency is not None else "",
+        "BoxColor": resp_btn.cget("bg"),
+        "BoxRelX": box_geometry.get("relx", ""),
+        "BoxRelY": box_geometry.get("rely", ""),
+        "BoxRelWidth": box_geometry.get("relwidth", ""),
+        "BoxRelHeight": box_geometry.get("relheight", ""),
+        "PelletsCommanded": pellets_commanded,
+    }
+    records.append(row)
+    append_csv(trial_csv_path(), TRIAL_COLUMNS, row)
+
+
+def write_session():
+    def count(stage, outcome):
+        return sum(1 for r in records if r["Stage"] == stage and r["Outcome"] == outcome)
+
+    summary = {
+        "Subject": Subject,
+        "Date": datetime.datetime.now().isoformat(timespec="seconds"),
+        "StartStage": StartStage,
+        "LastStage": records[-1]["Stage"] if records else "",
+        "Autoshape": Autoshape,
+        "FRRequirement": fr_req,
+        "TrialsStarted": trial,
+        "Stage0Responses": stage_0_responses,
+        "Stage0Autoshaped": count(0, "autoshape"),
+        "Stage0HandShaped": count(0, "handshape"),
+        "Stage1Responses": stage_1_responses,
+        "Stage1HandShaped": count(1, "handshape"),
+        "Stage2Responses": stage_2_responses,
+        "Stage2Omissions": count(2, "omission"),
+        "Stage3Responses": stage_3_responses,
+        "Stage3Omissions": stage_3_omissions,
+        "Stage4Correct": stage_4_responses,
+        "Stage4Incorrect": stage_4_incorrects,
+        "Stage4Omissions": stage_4_omissions,
+        "FinalButtonSize": round(btn_size, 4),
+        "PelletsCommanded": pellets_commanded,
+    }
+    append_csv(session_csv_path(), SESSION_COLUMNS, summary)
+
+
 # START MAIN PROGRAM LOOP
 
 # ---------------------------------------------------------------------------
@@ -270,12 +403,15 @@ def reinforcement():
 
 def stage_0_setup():
     global trial, stage_0_start_time, fr_resp
+    if shutting_down:
+        return
     trial += 1
     fr_resp = 0  # a partial ratio must not carry into the next trial
     print("trial started - stage 0")
     stage_0_start_time = perf_counter() #start timer
     resp_btn.config(bg="black")
     resp_btn.place(relheight=1.0, relwidth=1, relx=1.0, rely=0.0, anchor="ne") #place response button (whole screen)
+    snapshot_box()
     stage_0()
 
 
@@ -292,6 +428,7 @@ def stage_0():
             resp_btn.place_forget()
             # reinforce, then reset response variable back to 0
             reinforcement()
+            record(0, "response", stage_0_start_time)
             response = 0
             color_on = 0
             # if max number of stage 0 responses is exceeded, begin stage 1, else loop
@@ -305,6 +442,7 @@ def stage_0():
         elif hand_shape_resp != 0:
             resp_btn.place_forget()
             reinforcement()
+            record(0, "handshape")
             response = 0
             color_on = 0
             hand_shape_resp = 0
@@ -328,6 +466,7 @@ def stage_0():
                 if Autoshape == 1:
                     print("autoshape reinforced")
                     reinforcement()
+                    record(0, "autoshape")
                     color_on = 0
                     resp_btn.place_forget()
                     time.sleep(1)
@@ -337,6 +476,8 @@ def stage_0():
             else:
                 stage_0()
 
+    if shutting_down:
+        return
     # schedule next tick on the Tk main thread (gui.after, not threading.Timer)
     gui.after(10, stage_0_loop)
 
@@ -345,6 +486,8 @@ def stage_0():
 
 def stage_1_setup():
     global trial, stage_1_start_time, fr_resp
+    if shutting_down:
+        return
     time.sleep(random.choice(VI_list)) # pause for a random amount of time chosen from the VI_list array
     trial += 1
     fr_resp = 0  # a partial ratio must not carry into the next trial
@@ -354,6 +497,7 @@ def stage_1_setup():
     # creates response button, colored yellow by default
     resp_btn.place(relheight=1.0, relwidth=1, relx=1.0, rely=0.0, anchor="ne")
     resp_btn.config(bg="yellow")
+    snapshot_box()
     stage_1()
 
 
@@ -366,6 +510,7 @@ def stage_1():
             stage_1_responses += 1
             resp_btn.place_forget()
             reinforcement()
+            record(1, "response", stage_1_start_time)
             response = 0
             # stage 2 if max stage 1 responses is reached
             if stage_1_responses >= Stage1Resp:
@@ -379,6 +524,7 @@ def stage_1():
         elif hand_shape_resp != 0:
             resp_btn.place_forget()
             reinforcement()
+            record(1, "handshape")
             response = 0
             hand_shape_resp = 0
             stage_1_setup()
@@ -387,6 +533,8 @@ def stage_1():
         else:
             stage_1()
 
+    if shutting_down:
+        return
     gui.after(10, stage_1_loop)
 
 # ---------------------------------------------------------------------------
@@ -394,6 +542,8 @@ def stage_1():
 
 def stage_2_setup():
     global trial, stage_2_start_time, fr_resp
+    if shutting_down:
+        return
     time.sleep(random.choice(VI_list)) # pause for a random amount of time chosen from the VI_list array
     trial += 1
     fr_resp = 0  # a partial ratio must not carry into the next trial
@@ -403,6 +553,7 @@ def stage_2_setup():
     # places response button
     resp_btn.place(relheight=0.4, relwidth=1, relx=1.0, rely=0.2, anchor="ne")
     resp_btn.config(bg="yellow")
+    snapshot_box()
     stage_2()
 
 
@@ -415,6 +566,7 @@ def stage_2():
             stage_2_responses += 1
             resp_btn.place_forget()
             reinforcement()
+            record(2, "response", stage_2_start_time)
             response = 0
             # stage 3 if max stage 2 responses is reached
             if stage_2_responses >= Stage2Resp:
@@ -428,10 +580,13 @@ def stage_2():
         else:
             if perf_counter() - stage_2_start_time >= DelivTimer:
                 resp_btn.place_forget()
+                record(2, "omission")
                 stage_2_setup()
             else:
                 stage_2()
 
+    if shutting_down:
+        return
     gui.after(10, stage_2_loop)
 
 # ---------------------------------------------------------------------------
@@ -439,6 +594,8 @@ def stage_2():
 
 def stage_3_setup():
     global trial, stage_3_start_time, fr_resp
+    if shutting_down:
+        return
     time.sleep(random.choice(VI_list)) # pause for a random amount of time chosen from the VI_list array
     trial += 1
     fr_resp = 0
@@ -452,6 +609,7 @@ def stage_3_setup():
                    rely=random.choice(position_list)[1:], anchor="ne")
     resp_btn.config(bg="yellow")
     stage_3_start_time = perf_counter()
+    snapshot_box()
     stage_3()
 
 
@@ -464,6 +622,7 @@ def stage_3():
             stage_3_responses += 1
             resp_btn.place_forget()
             reinforcement()
+            record(3, "response", stage_3_start_time)
             response = 0
             # stage 4 if max stage 3 responses is reached
             if stage_3_responses >= Stage3Resp:
@@ -477,10 +636,13 @@ def stage_3():
             if perf_counter() - stage_3_start_time >= LimitedHold:
                 stage_3_omissions += 1
                 resp_btn.place_forget()
+                record(3, "omission")
                 stage_3_setup()
             else:
                 stage_3()
 
+    if shutting_down:
+        return
     gui.after(10, stage_3_loop)
 
 # ---------------------------------------------------------------------------
@@ -490,6 +652,8 @@ def stage_3():
 
 def stage_4_setup():
     global inc, trial, stage_4_start_time, btn_size, size_adj_trials, fr_resp, inc_resp
+    if shutting_down:
+        return
 
     # inc functions the same as the response variable
     # when an incorrect response is given, pause for a random time divided by 3
@@ -531,6 +695,7 @@ def stage_4_setup():
     print(size_adj_trials)
     print(size_adj_correct)
     stage_4_start_time = perf_counter()
+    snapshot_box()
     stage_4()
 
 
@@ -541,6 +706,7 @@ def stage_4():
         # incorrect if block, waiting for button press
         if inc != 0:
             stage_4_incorrects += 1
+            record(4, "incorrect", stage_4_start_time)
             response = 0
             resp_btn.place_forget()
             inc_btn.place_forget()
@@ -554,12 +720,16 @@ def stage_4():
             inc_btn.place_forget()
             gui.update()
             reinforcement()
+            record(4, "correct", stage_4_start_time)
             response = 0
             # clears screen when max trials is exceeded
             if stage_4_responses >= Stage4Resp:
                 resp_btn.place_forget()
                 gui.update()
                 play_sound('end_tone.wav')  # play tone for end
+                # session complete: bring up the summary, as the quit
+                # button does (report() only ever runs once either way)
+                exit_program()
 
             else:
                 stage_4_setup()
@@ -569,12 +739,15 @@ def stage_4():
             if perf_counter() - stage_4_start_time >= LimitedHold:
                 stage_4_omissions += 1
                 resp_btn.place_forget()
+                record(4, "omission")
                 inc_btn.place_forget()
                 gui.update()
                 stage_4_setup()
             else:
                 stage_4()
 
+    if shutting_down:
+        return
     gui.after(100, stage_4_loop)
 
 # exit program function, clears gui elements, calls report function
@@ -583,16 +756,31 @@ def exit_program():
         end_program()
     report()
 
-# report function, destroys gui, calls report_end function
+# report function, stops the task and calls report_end function
 def report():
-    # Cancel pending after() callbacks so they don't fire on a destroyed root
-    # and print "invalid command name ..." at shutdown.
+    """Close the session down and put the summary up.
+
+    Runs at most once: the quit button can be pressed again while a flash or
+    a stage transition is pumping the event loop, and summarising twice
+    would write two session rows.
+    """
+    global shutting_down
+
+    if shutting_down:
+        return
+    shutting_down = True
+
+    # Cancel the pending stage loop so no trial runs behind the summary.
     for aid in gui.tk.eval('after info').split():
-        gui.after_cancel(aid)
-    gui.destroy()
+        try:
+            gui.after_cancel(aid)
+        except Exception:
+            pass
+    resp_btn.place_forget()
+    inc_btn.place_forget()
     report_end()
 
-# gui clear function called by exit_program (report() destroys gui)
+# gui clear function called by exit_program (Exit on the summary destroys gui)
 def end_program():
     pass
 
@@ -621,7 +809,8 @@ def settings():
     # gets current values for all variables listed below
     def update_vals():
         global DelivTimer, LimitedHold, Stage0Resp, Stage1Resp, Stage2Resp, Stage3Resp, \
-            Stage4Resp, StartStage, Blackout, Autoshape, fr_req
+            Stage4Resp, StartStage, Blackout, Autoshape, fr_req, Subject, ShowCursor
+        Subject = e_subj.get().strip() or "Sbj000"
         DelivTimer = float(e4.get())
         LimitedHold = float(e5.get())
         Blackout = float(e6.get())
@@ -637,6 +826,7 @@ def settings():
             Autoshape = 1
         else:
             Autoshape = 0
+        ShowCursor = 1 if cursor_var.get() == "Visible" else 0
 
     # sets up settings menu
     def setup(var):
@@ -657,11 +847,11 @@ def settings():
     b1.grid(row=6, column=1, rowspan=1, columnspan=2)
 
     stage_var = IntVar()
-    rd0 = Radiobutton(popup, text="Stage 0\nFR-1", variable=stage_var, value=0)
-    rd1 = Radiobutton(popup, text="Stage 1\nColor Discrimination", variable=stage_var, value=1)
-    rd2 = Radiobutton(popup, text="Stage 2\nSmaller Box", variable=stage_var, value=2)
+    rd0 = Radiobutton(popup, text="Stage 0\nAutoshaping", variable=stage_var, value=0)
+    rd1 = Radiobutton(popup, text="Stage 1\nWhole Screen", variable=stage_var, value=1)
+    rd2 = Radiobutton(popup, text="Stage 2\nNarrow Bar", variable=stage_var, value=2)
     rd3 = Radiobutton(popup, text="Stage 3\nMoving Box", variable=stage_var, value=3)
-    rd4 = Radiobutton(popup, text="Stage 4\nPunish Incorrect", variable=stage_var, value=4)
+    rd4 = Radiobutton(popup, text="Stage 4\nShrinking Box", variable=stage_var, value=4)
     rd0.grid(row=1, column=1, rowspan=1, columnspan=2)
     rd1.grid(row=2, column=1, rowspan=1, columnspan=2)
     rd2.grid(row=3, column=1, rowspan=1, columnspan=2)
@@ -729,6 +919,21 @@ def settings():
     e6.insert(0, str(Blackout))
     e9.insert(0, str(fr_req))
 
+    # subject ID, used only to name the CSV data files
+    # row 0 is the stretchy top margin; sticky="s" keeps these at its bottom
+    # edge, directly above the first row of settings
+    tk.Label(popup, text="Subject:", font=24).grid(row=0, rowspan=1, column=3, padx=2, pady=25, sticky="s")
+    e_subj = tk.Entry(popup, width=8, font=24)
+    e_subj.grid(row=0, rowspan=1, column=4, ipadx=5, ipady=8, padx=7, pady=10, sticky="s")
+    e_subj.insert(0, Subject)
+
+    # Hidden unless the experimenter changes it here; the choice is not
+    # remembered between sessions, so every run starts hidden again.
+    tk.Label(popup, text="Mouse cursor:", font=24).grid(row=6, rowspan=1, column=5, padx=2, pady=25)
+    cursor_var = StringVar(popup)
+    cursor_var.set("Visible" if ShowCursor else "Hidden")
+    OptionMenu(popup, cursor_var, "Hidden", "Visible").grid(row=6, rowspan=1, column=6, padx=2, pady=25)
+
     # configure grid size
     popup.grid_rowconfigure(0, weight=1)
     popup.grid_rowconfigure(8, weight=1)
@@ -740,12 +945,22 @@ def settings():
 
 # pulls up a report of responses, omissions, and incorrect responses from each stage
 def report_end():
+    """
+    Drawn inside the task window, in a panel that covers it, rather than in
+    a second Tk root. Two roots meant two nested mainloops -- the summary's
+    running inside the task window's -- and the process only ended if both
+    unwound cleanly. With one root, Exit destroys it, gui.mainloop() returns
+    and the script runs off the end of the `with device:` block. Same fix as
+    Color_Discrim.py.
+    """
+    write_session()
 
-    # window initialization
-    popup_end = tk.Tk()
-    width = popup_end.winfo_screenwidth()
-    height = popup_end.winfo_screenheight()
-    popup_end.geometry(f'{int(width * 1)}x{int(height * 1)}+{int(width * 0.0)}+{int(height * 0.0)}')
+    # The pointer may be hidden during the task; the summary is for a
+    # person, so bring it back regardless -- Exit is unclickable otherwise.
+    gui.configure(cursor="")
+
+    popup_end = tk.Frame(gui)
+    popup_end.place(relx=0, rely=0, relwidth=1, relheight=1)
 
     # label creation with all the data
     l0_1 = tk.Label(popup_end, text="Stage 0\n", font=("Bold", 24))
@@ -784,7 +999,8 @@ def report_end():
     l4_5.grid(row=3, column=6, padx=10, pady=5)
 
     # creates and places an exit button
-    b1 = tk.Button(popup_end, text='Exit', command=lambda: popup_end.destroy(), font=("bold", "20"), height=3, width=10)
+    # destroying the root ends the one mainloop, which is the whole exit
+    b1 = tk.Button(popup_end, text='Exit', command=gui.destroy, font=("bold", "20"), height=3, width=10)
     b1.grid(row=3, column=1, columnspan=4, padx=5, pady=5)
 
     # configures grid size
@@ -792,9 +1008,6 @@ def report_end():
     popup_end.grid_rowconfigure(4, weight=1)
     popup_end.grid_columnconfigure(0, weight=1)
     popup_end.grid_columnconfigure(7, weight=1)
-
-    # runs the window
-    popup_end.mainloop()
 
 # hand shape variable, changes based on keyboard inputs found below in the main pig gui initialization
 def hand_shape(var):
@@ -815,7 +1028,8 @@ with device:
     # gui initialization for main pig interface
     gui = tk.Tk()
     gui.configure(bg="black")
-    gui.configure(bg="black", cursor="none")
+    # An empty cursor spec means "inherit the default arrow"; "none" hides it.
+    gui.configure(bg="black", cursor="" if ShowCursor else "none")
 
     # places start button
     start_button = tk.Button(gui, text="START", font=("bold", "40"), command=lambda: start())
