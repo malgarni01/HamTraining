@@ -1,22 +1,26 @@
-"""Two-choice color discrimination for the CoasterChase pig rig.
+"""Two-stage yellow/blue discrimination for the CoasterChase pig rig.
 
-Implements the discrimination procedure described in:
+Bridges Shaping_full.py (yellow box only) to a two-choice colour task, and
+then measures performance on that task. Two stages, selected by the
+experimenter at session start:
 
-    Ao W, Grace M, Floyd CL, Vonder Haar C. A Touchscreen Device for
-    Behavioral Testing in Pigs. Biomedicines. 2022;10(10):2612.
-    doi:10.3390/biomedicines10102612
+  Transitional  A "priming screen" -- a single yellow square in the centre --
+                opens every trial. Pressing it clears the screen and brings
+                up the yellow/blue choice pair; pressing yellow there is
+                reinforced. Priming with the shaped stimulus immediately
+                before the choice is what teaches the animal that yellow is
+                still the correct option once a second colour is on screen.
 
-Three phases, selected by the experimenter at session start:
+  Testing       The same yellow/blue choice with the priming screen omitted:
+                the choice pair appears at trial onset. Used for cognitive
+                assessment, where a prime would cue the answer.
 
-  C1  Free-choice acquisition. Yellow (correct) vs blue. No correction.
-  C2  As C1, plus correction trials: after an incorrect choice the identical
-      trial is re-presented with the incorrect option shown but inactive.
-  C3  Conditional discrimination. A green or blue sample appears on the
-      centre button; only the choice matching the sample is reinforced.
-      FR-3 on the centre and on the choice buttons.
+Both stages score identically -- yellow is S+, blue is S- -- so the two write
+the same columns to the same CSV files and only the Phase field differs.
 
-Shaping (Shaping_full.py) is Phase A/B and is a separate program; this file
-does not import from it. The feeder path is shared via iointerface_api.
+Geometry, tones, flashes and the feeder path are shared with
+Shaping_full.py; this file does not import from it. The feeder is reached
+through iointerface_api.
 """
 
 from tkinter import *
@@ -66,23 +70,33 @@ CENTRE_SIZE = (0.40, 0.45)  # relwidth, relheight. Matches the stage 3 box in
 CHOICE_POS = {"L": (0.22, 0.5), "R": (0.78, 0.5)}
 CHOICE_SIZE = (0.28, 0.45)
 
-# Colors by phase. C1/C2 reinforce yellow against a blue comparison; C3
-# reinforces whichever of green/blue matches the sample on the centre button.
+# Yellow is correct in both stages; blue is the incorrect comparison. Yellow
+# is also the colour of the priming square and of the box used throughout
+# Shaping_full.py, so the stimulus the animal was shaped on is the stimulus
+# it is reinforced for choosing here.
 S_PLUS = "yellow"
 S_MINUS = "blue"
-C3_COLORS = ["green", "blue"]
+
+# Stage codes. 1 keeps the priming screen, 2 drops it.
+TRANSITIONAL = 1
+TESTING = 2
+STAGE_LABELS = {TRANSITIONAL: "Transitional", TESTING: "Testing"}
 
 # Default Settings (Can be modified from the startup popup)
-Phase = 1              # 1 = C1, 2 = C2, 3 = C3
+Stage = TRANSITIONAL   # 1 = Transitional (priming screen), 2 = Testing
 Subject = "Sbj000"
 MaxTrials = 60         # first presentations; correction trials do not count
 LimitedHold = 25       # seconds the animal has to respond, each of the two steps
-FRCentre = 1           # presses required on the centre start box
+FRCentre = 1           # presses required on the priming square (Transitional only)
 FRChoice = 1           # presses required on a choice box to commit it
 ReinfAmt = 1           # pellets per correct choice
 Blackout = 0.15        # delay before the session starts, minutes
-Correction = 0         # 1 = correction trials enabled (forced on in C2)
+Correction = 0         # 1 = correction trials enabled (either stage)
 SessionCap = 60        # hard stop, minutes
+ShowCursor = 0         # 0 = mouse pointer hidden over the task window
+                       # (default: the pig's touches should not be
+                       # accompanied by a pointer); 1 = visible, for
+                       # mouse-driven testing without a touchscreen
 
 # Session state
 trial = 0                  # first-presentation counter
@@ -92,7 +106,7 @@ side_history = []          # realised L/R sequence, for the run-length cap and a
 
 # Per-presentation state
 is_correction = False
-sample_color = ""          # C3 only
+sample_color = ""          # priming square colour; blank in Testing
 correct_side = "L"
 choice_colors = {"L": S_PLUS, "R": S_MINUS}
 active_choices = set()     # which choice frames currently accept a press
@@ -104,6 +118,9 @@ awaiting = "none"          # "centre" | "choice" | "none"
 timeout_id = None          # cancellable after() id for LimitedHold
 iti_id = None              # cancellable after() id for the ITI
 pellets_commanded = 0
+shutting_down = False      # set once the session is over; makes the exit
+                           # path idempotent and stops anything scheduling
+                           # or scoring another trial behind the summary
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +151,13 @@ def session_csv_path():
     return os.path.join(get_data_dir(), f"{Subject}_discrim_sessions.csv")
 
 
+# Column set is unchanged from the three-phase version so old and new
+# sessions land in the same files. Two fields shift meaning with the stages:
+#   Phase        now the stage name, "Transitional" or "Testing".
+#   SampleColor  the priming square's colour in Transitional; blank in
+#                Testing, which shows no priming screen.
+# StartLatency and the "start" omission likewise only occur in Transitional;
+# in Testing they are blank and zero, since there is nothing to start.
 TRIAL_COLUMNS = ["Subject", "Date", "Phase", "Trial", "Presentation",
                  "SampleColor", "CorrectSide", "ChosenSide", "ChosenColor",
                  "Correct", "StartLatency", "ChoiceLatency", "Omission",
@@ -165,7 +189,7 @@ def record(presentation, chosen_side, correct, omission, choice_latency):
     row = {
         "Subject": Subject,
         "Date": datetime.datetime.now().isoformat(timespec="seconds"),
-        "Phase": f"C{Phase}",
+        "Phase": STAGE_LABELS[Stage],
         "Trial": trial,
         "Presentation": presentation,
         "SampleColor": sample_color,
@@ -199,7 +223,7 @@ def summarise():
     return {
         "Subject": Subject,
         "Date": datetime.datetime.now().isoformat(timespec="seconds"),
-        "Phase": f"C{Phase}",
+        "Phase": STAGE_LABELS[Stage],
         "TrialsCompleted": len(first),
         "FirstPresAccuracy": round(acc, 1),
         "LeftChoicePct": round(left, 1),
@@ -326,6 +350,9 @@ def trial_setup(correction=False):
     global trial, is_correction, sample_color, correct_side, choice_colors
     global fr_count, centre_onset, awaiting, start_latency
 
+    if shutting_down:
+        return
+
     if not correction:
         # Session limits are checked on first presentations only, so a
         # correction sequence is never cut off half way through.
@@ -340,34 +367,38 @@ def trial_setup(correction=False):
         correct_side = next_side()
         side_history.append(correct_side)
 
-        if Phase == 3:
-            # Conditional discrimination: the sample determines which color
-            # is correct on this trial; the other color goes opposite.
-            sample_color = random.choice(C3_COLORS)
-            other = [c for c in C3_COLORS if c != sample_color][0]
-            choice_colors = {correct_side: sample_color,
-                             ("R" if correct_side == "L" else "L"): other}
-        else:
-            sample_color = ""
-            choice_colors = {correct_side: S_PLUS,
-                             ("R" if correct_side == "L" else "L"): S_MINUS}
+        # Yellow is correct in both stages; only the side moves. The priming
+        # square is logged as the sample in Transitional so the column says
+        # what the animal was shown before the choice.
+        sample_color = S_PLUS if Stage == TRANSITIONAL else ""
+        choice_colors = {correct_side: S_PLUS,
+                         ("R" if correct_side == "L" else "L"): S_MINUS}
 
     is_correction = correction
     fr_count = {"centre": 0, "L": 0, "R": 0}
     start_latency = 0.0
-    awaiting = "centre"
 
     play_sound('7500.long.wav')  # long tone signals trial start
 
-    # C3 shows the sample colour on the centre button; C1/C2 use a plain
-    # yellow start box (protocol 8.1).
+    if Stage != TRANSITIONAL:
+        # Testing: no priming screen, so the trial opens on the choice pair.
+        # centre_onset stays 0 and StartLatency is logged blank -- there is
+        # no start response to time, and a "start" omission cannot occur.
+        awaiting = "none"
+        centre_onset = 0.0
+        present_choices()
+        return
+
+    # Transitional: the priming screen is a single yellow square in the
+    # centre, the same colour and size as the box in Shaping_full.py.
     #
     # Place FIRST, flush so the frame is really mapped, and only then set the
     # colour -- see paint_color() for why the order matters.
+    awaiting = "centre"
     centre_btn.place(relx=CENTRE_POS[0], rely=CENTRE_POS[1],
                      relwidth=CENTRE_SIZE[0], relheight=CENTRE_SIZE[1],
                      anchor="center")
-    paint_color(centre_btn, sample_color if Phase == 3 else S_PLUS)
+    paint_color(centre_btn, S_PLUS)
     gui.update()
 
     centre_onset = perf_counter()
@@ -381,17 +412,21 @@ def arm_timeout(kind):
 
 
 def centre_pressed(_event=None):
-    """Centre start box. Gating the choices on a centre press puts the pig at
-    a known position and orientation at choice onset (protocol 8.1)."""
-    global awaiting, choice_onset, start_latency, active_choices
+    """Priming square pressed (Transitional only).
+
+    Gating the choices on a press of the shaped yellow square puts the pig at
+    a known position and orientation at choice onset, and pairs the colour it
+    was shaped on with the choice that is about to be reinforced.
+    """
+    global awaiting, start_latency
 
     if awaiting != "centre":
         return
 
     # Count first, gate immediately. No tone here at any point: trial start is
     # already marked by 7500.long.wav, and sounding 2900 -- the reinforcement
-    # tone -- for merely starting a trial devalues it as a signal. The choices
-    # appearing is the feedback for a completed centre ratio.
+    # tone -- for merely clearing the priming screen devalues it as a signal.
+    # The choices appearing is the feedback for a completed priming ratio.
     fr_count["centre"] += 1
     if fr_count["centre"] < FRCentre:
         neutral_flash()
@@ -400,10 +435,20 @@ def centre_pressed(_event=None):
     cancel_timeout()
     start_latency = perf_counter() - centre_onset
     centre_btn.place_forget()
+    present_choices()
 
-    # Place both choices. On a correction trial the incorrect option is
-    # displayed but inactive (protocol 8.3) -- it still absorbs the touch,
-    # it just does not respond.
+
+def present_choices():
+    """Show the yellow/blue pair and open the choice window.
+
+    Reached from the priming press in Transitional and straight from
+    trial_setup() in Testing, so the choice step itself is identical in the
+    two stages -- same geometry, same limited hold, same scoring.
+    """
+    global awaiting, choice_onset, active_choices
+
+    # On a correction trial the incorrect option is displayed but inactive --
+    # it still absorbs the touch, it just does not respond.
     for side in ("L", "R"):
         choice_btn[side].place(relx=CHOICE_POS[side][0], rely=CHOICE_POS[side][1],
                                relwidth=CHOICE_SIZE[0], relheight=CHOICE_SIZE[1],
@@ -437,8 +482,7 @@ def choice_pressed(side):
         # Sub-criterion presses are SILENT, with a neutral flash identical on
         # both buttons. Two separate reasons:
         #   - the correct/incorrect tones here would tell the pig the answer
-        #     before the choice is committed, a confound once FRChoice > 1,
-        #     which is exactly the C3 case;
+        #     before the choice is committed, a confound once FRChoice > 1;
         #   - 2900.short.wav is the reinforcement tone. Sounding it on touches
         #     that earn nothing -- including touches on the WRONG button --
         #     devalues it as a conditioned reinforcer. An earlier version
@@ -469,10 +513,10 @@ def outcome(chosen_side, latency):
     else:
         play_sound('290.short.wav')
         record(presentation, chosen_side, False, "none", latency)
-        # Correction trials are enabled outright in C2 and by setting in C3.
-        # They repeat the identical trial until the pig chooses correctly
-        # (protocol 8.3), so no repeat cap is imposed; an omission breaks the
-        # sequence via omission() below.
+        # Correction trials are optional in both stages. They repeat the
+        # identical trial -- priming screen included, in Transitional -- until
+        # the pig chooses correctly, so no repeat cap is imposed; an omission
+        # breaks the sequence via omission() below.
         if Correction:
             next_trial(correction=True, shortened=True)
         else:
@@ -488,8 +532,9 @@ def omission(kind):
 
     presentation = "correction" if is_correction else "first"
     # No choice was committed, so ChoiceLatency is undefined either way.
-    # StartLatency survives on a "choice" omission -- the pig did press the
-    # centre box -- and is logged blank on a "start" omission.
+    # StartLatency survives on a "choice" omission in Transitional -- the pig
+    # did press the priming square -- and is logged blank on a "start"
+    # omission, and throughout Testing.
     record(presentation, "", False, kind, 0.0)
     print(f"[OMISSION] trial {trial}: {kind}")
     # An omission ends any correction sequence and moves to a fresh trial.
@@ -503,6 +548,8 @@ def next_trial(correction=False, shortened=False):
     is done here so a run of errors does not stall the session.
     """
     global iti_id
+    if shutting_down:
+        return
     iti = random.choice(VI_list)
     if shortened:
         iti = iti / 3.0
@@ -524,14 +571,27 @@ def exit_program():
 
 
 def report():
-    # Cancel pending after() callbacks so they don't fire on a destroyed root
-    # and print "invalid command name ..." at shutdown.
+    """Close the session down and put the summary up.
+
+    Runs at most once: the quit button, a limit being reached and a touch
+    that arrives while reinforcement() is pumping the event loop can all
+    land here, and summarising twice would write two session rows.
+    """
+    global shutting_down, awaiting
+
+    if shutting_down:
+        return
+    shutting_down = True
+
+    # Cancel the pending ITI / limited hold so no trial starts behind the
+    # summary, and stop the task widgets from scoring any further touches.
     for aid in gui.tk.eval('after info').split():
         try:
             gui.after_cancel(aid)
         except Exception:
             pass
-    gui.destroy()
+    awaiting = "none"
+    clear_screen()
     report_end()
 
 
@@ -549,10 +609,10 @@ def start():
 def settings():
 
     def update_vals():
-        global Phase, Subject, MaxTrials, LimitedHold, FRCentre, FRChoice, \
-            ReinfAmt, Blackout, Correction, SessionCap
+        global Stage, Subject, MaxTrials, LimitedHold, FRCentre, FRChoice, \
+            ReinfAmt, Blackout, Correction, SessionCap, ShowCursor
 
-        Phase = int(phase_var.get())
+        Stage = int(stage_var.get())
         Subject = e_subj.get().strip() or "Sbj000"
         MaxTrials = int(float(e_trials.get()))
         LimitedHold = float(e_hold.get())
@@ -561,53 +621,44 @@ def settings():
         ReinfAmt = int(float(e_reinf.get()))
         Blackout = float(e_black.get())
         SessionCap = float(e_cap.get())
-
-        # C2 is defined by correction trials, so they are forced on there.
-        # C1 never uses them. C3 follows the dropdown.
-        if Phase == 2:
-            Correction = 1
-        elif Phase == 1:
-            Correction = 0
-        else:
-            Correction = 1 if corr_var.get() == "Yes" else 0
+        Correction = 1 if corr_var.get() == "Yes" else 0
+        ShowCursor = 1 if cursor_var.get() == "Visible" else 0
 
     def setup():
         update_vals()
         popup.destroy()
 
-    def phase_defaults():
-        """C3 runs FR-3 on the centre and the choices (Ao et al.); C1/C2 FR-1."""
-        fr = "3" if int(phase_var.get()) == 3 else "1"
-        e_frc.delete(0, END); e_frc.insert(0, fr)
-        e_frx.delete(0, END); e_frx.insert(0, fr)
+    def stage_defaults():
+        """Grey out the priming ratio in Testing, where nothing primes."""
+        e_frc.config(state=("normal" if int(stage_var.get()) == TRANSITIONAL
+                            else "disabled"))
 
     popup = tk.Tk()
-    popup.title("Phase C - Discrimination")
+    popup.title("Colour Discrimination - Transitional / Testing")
     width = popup.winfo_screenwidth()
     height = popup.winfo_screenheight()
     popup.geometry(f'{int(width * 0.85)}x{int(height * 0.8)}+{int(width * 0.075)}+{int(height * 0.075)}')
 
-    phase_var = IntVar(value=1)
-    rd1 = Radiobutton(popup, text="C1\nFree choice\n(yellow vs blue)",
-                      variable=phase_var, value=1, command=phase_defaults)
-    rd2 = Radiobutton(popup, text="C2\nCorrection trials",
-                      variable=phase_var, value=2, command=phase_defaults)
-    rd3 = Radiobutton(popup, text="C3\nConditional discrimination\n(FR-3)",
-                      variable=phase_var, value=3, command=phase_defaults)
+    stage_var = IntVar(value=TRANSITIONAL)
+    rd1 = Radiobutton(popup, text="Transitional\nPriming screen, then\nyellow vs blue",
+                      variable=stage_var, value=TRANSITIONAL, command=stage_defaults)
+    rd2 = Radiobutton(popup, text="Testing\nYellow vs blue only\n(no priming screen)",
+                      variable=stage_var, value=TESTING, command=stage_defaults)
     rd1.grid(row=1, column=1, padx=2, pady=15)
     rd2.grid(row=2, column=1, padx=2, pady=15)
-    rd3.grid(row=3, column=1, padx=2, pady=15)
 
     labels = [
         ("Subject:", 1), ("Trials\n(first presentations):", 2),
-        ("Limited\nHold (s):", 3), ("FR centre:", 4), ("FR choice:", 5),
+        ("Limited\nHold (s):", 3), ("FR priming\n(Transitional only):", 4),
+        ("FR choice:", 5),
     ]
     for text, row in labels:
         tk.Label(popup, text=text, font=24).grid(row=row, column=3, padx=2, pady=15)
 
     labels2 = [
         ("Pellets per\ncorrect:", 1), ("Blackout (min):", 2),
-        ("Session cap\n(min):", 3), ("Correction trials\n(C3 only):", 4),
+        ("Session cap\n(min):", 3), ("Correction trials:", 4),
+        ("Mouse cursor:", 5),
     ]
     for text, row in labels2:
         tk.Label(popup, text=text, font=24).grid(row=row, column=5, padx=2, pady=15)
@@ -627,8 +678,14 @@ def settings():
         widget.grid(row=row, column=6, ipadx=5, ipady=8, padx=7, pady=10)
 
     corr_var = StringVar(popup)
-    corr_var.set("Yes")
+    corr_var.set("Yes" if Correction else "No")
     OptionMenu(popup, corr_var, "Yes", "No").grid(row=4, column=6, padx=2, pady=10)
+
+    # Hidden unless the experimenter changes it here; the choice is not
+    # remembered between sessions, so every run starts hidden again.
+    cursor_var = StringVar(popup)
+    cursor_var.set("Visible" if ShowCursor else "Hidden")
+    OptionMenu(popup, cursor_var, "Hidden", "Visible").grid(row=5, column=6, padx=2, pady=10)
 
     e_subj.insert(0, Subject)
     e_trials.insert(0, str(MaxTrials))
@@ -638,6 +695,7 @@ def settings():
     e_reinf.insert(0, str(ReinfAmt))
     e_black.insert(0, str(Blackout))
     e_cap.insert(0, str(SessionCap))
+    stage_defaults()
 
     tk.Button(popup, text="Start", command=setup, font=("bold", "14"),
               height=3, width=12).grid(row=6, column=1, columnspan=2, pady=20)
@@ -655,6 +713,12 @@ def report_end():
     End-of-session summary. First-presentation accuracy and left-choice
     percentage are the two numbers protocol 8.3 and 8.4 require checking
     every session; pellets commanded feeds the 9.2 reconciliation.
+
+    Drawn inside the task window, in a panel that covers it, rather than in
+    a second Tk root. Two roots meant two nested mainloops -- the summary's
+    running inside the task window's -- and the process only ended if both
+    unwound cleanly. With one root, Exit destroys it, gui.mainloop() returns
+    and the script runs off the end of the `with device:` block.
     """
     summary = summarise()
     write_session(summary)
@@ -664,14 +728,16 @@ def report_end():
         print(f"{k}: {v}")
     print(f"side sequence: {''.join(side_history)}")
 
-    popup_end = tk.Tk()
-    popup_end.title("Session Summary")
-    width = popup_end.winfo_screenwidth()
-    height = popup_end.winfo_screenheight()
-    popup_end.geometry(f'{int(width)}x{int(height)}+0+0')
+    # The pointer is hidden during the task unless the experimenter asked
+    # for it; the summary is for a person, so bring it back regardless --
+    # Exit is unclickable with a mouse otherwise.
+    gui.configure(cursor="")
 
-    tk.Label(popup_end, text=f"{Subject}  -  Phase C{Phase}",
-             font=("Bold", 30)).grid(row=1, column=1, columnspan=4, pady=20)
+    panel = tk.Frame(gui)
+    panel.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+    tk.Label(panel, text=f"{Subject}  -  {STAGE_LABELS[Stage]} stage",
+             font=("Bold", 30)).grid(row=1, column=1, columnspan=3, pady=20)
 
     cells = [
         ("Trials\ncompleted", summary["TrialsCompleted"]),
@@ -681,13 +747,14 @@ def report_end():
         ("Start\nomissions", summary["StartOmissions"]),
         ("Choice\nomissions", summary["ChoiceOmissions"]),
         ("Median start\nlatency (s)", summary["MedianStartLatency"]),
+        ("Median choice\nlatency (s)", summary["MedianChoiceLatency"]),
         ("Pellets\ncommanded", summary["PelletsCommanded"]),
     ]
     for i, (label, value) in enumerate(cells):
-        col = 1 + (i % 4)
-        row = 2 + 2 * (i // 4)
-        tk.Label(popup_end, text=label, font=("Bold", 20)).grid(row=row, column=col, padx=15, pady=5)
-        tk.Label(popup_end, text=str(value), font=("Arial", 26)).grid(row=row + 1, column=col, padx=15, pady=5)
+        col = 1 + (i % 3)
+        row = 2 + 2 * (i // 3)
+        tk.Label(panel, text=label, font=("Bold", 20)).grid(row=row, column=col, padx=15, pady=5)
+        tk.Label(panel, text=str(value), font=("Arial", 26)).grid(row=row + 1, column=col, padx=15, pady=5)
 
     # Side bias reading, per the table in protocol 8.4.
     left = summary["LeftChoicePct"]
@@ -699,18 +766,17 @@ def report_end():
         note = "Emerging side bias"
     else:
         note = "Side balance normal"
-    tk.Label(popup_end, text=note, font=("Bold", 22), fg="red" if "BIAS" in note else "black") \
-        .grid(row=6, column=1, columnspan=4, pady=20)
+    tk.Label(panel, text=note, font=("Bold", 22), fg="red" if "BIAS" in note else "black") \
+        .grid(row=8, column=1, columnspan=3, pady=20)
 
-    tk.Button(popup_end, text='Exit', command=popup_end.destroy,
-              font=("bold", "20"), height=2, width=10).grid(row=8, column=1, columnspan=4, pady=20)
+    # Destroying the root ends the one mainloop, which is the whole exit.
+    tk.Button(panel, text='Exit', command=gui.destroy,
+              font=("bold", "20"), height=2, width=10).grid(row=10, column=1, columnspan=3, pady=20)
 
-    popup_end.grid_rowconfigure(0, weight=1)
-    popup_end.grid_rowconfigure(9, weight=1)
-    popup_end.grid_columnconfigure(0, weight=1)
-    popup_end.grid_columnconfigure(5, weight=1)
-
-    popup_end.mainloop()
+    panel.grid_rowconfigure(0, weight=1)
+    panel.grid_rowconfigure(11, weight=1)
+    panel.grid_columnconfigure(0, weight=1)
+    panel.grid_columnconfigure(4, weight=1)
 
 
 # ---------------------------------------------------------------------------
@@ -729,7 +795,8 @@ with device:
 
     # gui initialization for main pig interface
     gui = tk.Tk()
-    gui.configure(bg="black", cursor="none")
+    # An empty cursor spec means "inherit the default arrow"; "none" hides it.
+    gui.configure(bg="black", cursor="" if ShowCursor else "none")
 
     # places start button
     start_button = tk.Button(gui, text="START", font=("bold", "40"), command=lambda: start())

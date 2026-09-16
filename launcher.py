@@ -59,14 +59,15 @@ TASKS = [
         ],
     ),
     (
-        "Color Discrimination - Phase C (MED-PC pellet)",
+        "Color Discrimination (MED-PC pellet)",
         "Color_Discrim.py",
         [
-            "Two-choice colour discrimination. USES PELLETS.",
-            "Pick C1, C2 or C3 in the settings window:",
-            "  C1  yellow vs blue, free choice",
-            "  C2  as C1, plus correction trials",
-            "  C3  conditional discrimination, FR-3",
+            "Yellow vs blue discrimination. USES PELLETS.",
+            "Pick a stage in the settings window:",
+            "  Transitional  yellow priming square first, then",
+            "                yellow vs blue - bridges from shaping",
+            "  Testing       yellow vs blue only, no priming",
+            "                square - for cognitive assessment",
             "",
             "FR is the number of touches needed on one button to",
             "commit that choice - not a reinforcement schedule.",
@@ -96,7 +97,11 @@ def on_task_changed(*_):
             return
 
 
+launched = None   # the running task, waited on after this window closes
+
+
 def launch():
+    global launched
     label = task_var.get()
     script = next(s for d, s, _ in TASKS if d == label)
     script_path = os.path.join(HERE, script)
@@ -107,7 +112,7 @@ def launch():
     root.update()
     # Inherit stdout/stderr so the terminal that ran us keeps showing
     # the task's [REWARD] / status output.
-    subprocess.Popen([sys.executable, script_path], cwd=HERE)
+    launched = subprocess.Popen([sys.executable, script_path], cwd=HERE)
     root.destroy()
 
 
@@ -154,3 +159,12 @@ tk.Label(root, textvariable=status_var,
          font=("Arial", 10), bg="white", fg="gray40").pack()
 
 root.mainloop()
+
+# Stay alive until the task itself exits. Start-Training.bat prints
+# "----- session ended -----" and pauses as soon as this process returns;
+# without the wait that happened the moment the task started, so the console
+# sat at the pause prompt for the whole session and was still sitting there
+# after the operator pressed Exit -- which looks exactly like the program
+# failing to close.
+if launched is not None:
+    launched.wait()
