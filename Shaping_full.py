@@ -861,14 +861,14 @@ def settings():
     rd4.grid(row=5, column=1, rowspan=1, columnspan=2)
 
     # creates settings labels
-    l0 = tk.Label(popup, text=("Responses:" + str(Stage1Resp)), font=24)
-    l1 = tk.Label(popup, text=("Responses:" + str(Stage2Resp)), font=24)
+    l0 = tk.Label(popup, text=("Responses:" + str(Stage0Resp)), font=24)
+    l1 = tk.Label(popup, text=("Responses:" + str(Stage1Resp)), font=24)
     l2 = tk.Label(popup, text=("Responses:" + str(Stage2Resp)), font=24)
     l3 = tk.Label(popup, text=("Responses:" + str(Stage3Resp)), font=24)
     l8 = tk.Label(popup, text=("Responses:" + str(Stage4Resp)), font=24)
     l4 = tk.Label(popup, text=("Reinforcer\nDelay (s):\n" + str(DelivTimer)), font=24)
     l5 = tk.Label(popup, text=("Limited\nHold (s):\n" + str(LimitedHold)), font=24)
-    l6 = tk.Label(popup, text=("Blackout (s):\n" + str(Blackout)), font=24)
+    l6 = tk.Label(popup, text=("Blackout (min):\n" + str(Blackout)), font=24)
     options = ["Yes", "No"]
     auto_var = StringVar(popup)
     auto_var.set(options[0])
