@@ -456,6 +456,8 @@ def stage_0():
                     play_sound('7500.long.wav') # long tone signals start
                     color_on = 1
                     stage_0()
+                else:
+                    stage_0()
             else:
                 stage_0()
             
