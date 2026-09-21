@@ -18,6 +18,17 @@ experimenter at session start:
 Both stages score identically -- yellow is S+, blue is S- -- so the two write
 the same columns to the same CSV files and only the Phase field differs.
 
+Either stage can run one of two choice layouts, also set at session start:
+
+  Left / Right      The original pair: one yellow and one blue box at fixed
+                    positions either side of centre.
+
+  Random positions  One yellow box and 1-3 blue boxes, all the same size,
+                    dropped at non-overlapping random positions anywhere on
+                    the screen. Position carries no information about which
+                    box is correct, and with more than one distractor chance
+                    performance falls below 50%.
+
 Geometry, tones, flashes and the feeder path are shared with
 Shaping_full.py; this file does not import from it. The feeder is reached
 through iointerface_api.
@@ -58,7 +69,7 @@ if len(devices) == 0:
 VI_list = [3, 4, 4, 5, 5, 5, 6, 6, 7]  # variable interval ITI, seconds (protocol 8.1: VI 3-7 s)
 MAX_SAME_SIDE = 3  # pseudorandom cap: never more than this many same-side trials in a row
 
-# Screen geometry, relative units. Choices sit left and right of centre.
+# Screen geometry, relative units.
 FLASH_MS = 60                # dwell for a touch-acknowledgement flash, ms
 NEUTRAL_FLASH_BG = "gray50"  # identical for every sub-criterion touch, and
                              # distinct from the choice colours
@@ -69,6 +80,25 @@ CENTRE_SIZE = (0.40, 0.45)  # relwidth, relheight. Matches the stage 3 box in
                             # start target is the same size the animal was shaped on.
 CHOICE_POS = {"L": (0.22, 0.5), "R": (0.78, 0.5)}
 CHOICE_SIZE = (0.28, 0.45)
+
+# Choice layout codes. 1 is the fixed left/right pair; 2 scatters one yellow
+# box and NumBlue blue boxes at random non-overlapping positions.
+LAYOUT_LR = 1
+LAYOUT_RANDOM = 2
+LAYOUT_LABELS = {LAYOUT_LR: "LeftRight", LAYOUT_RANDOM: "Random"}
+LAYOUT_MENU = {LAYOUT_LR: "Left / Right", LAYOUT_RANDOM: "Random positions"}
+
+MAX_BLUE = 3                  # most S- boxes the settings screen offers
+MAX_BOXES = MAX_BLUE + 1      # frames built up front: 1 yellow + MAX_BLUE blue
+
+# Every box in a randomized trial is this size -- the S+ must not be findable
+# by size alone, so the yellow box cannot keep CHOICE_SIZE while the blue ones
+# shrink. Smaller than CHOICE_SIZE because four boxes plus gaps have to fit.
+RANDOM_CHOICE_SIZE = (0.22, 0.30)
+RANDOM_MIN_GAP = 0.02         # clear space between neighbouring boxes
+RANDOM_EDGE_MARGIN = 0.02     # clear space between a box and the screen edge
+RANDOM_TRIES = 200            # position samples per box before restarting
+RANDOM_RESTARTS = 50          # whole-layout restarts before the grid fallback
 
 # Yellow is correct in both stages; blue is the incorrect comparison. Yellow
 # is also the colour of the priming square and of the box used throughout
@@ -84,6 +114,9 @@ STAGE_LABELS = {TRANSITIONAL: "Transitional", TESTING: "Testing"}
 
 # Default Settings (Can be modified from the startup popup)
 Stage = TRANSITIONAL   # 1 = Transitional (priming screen), 2 = Testing
+Layout = LAYOUT_LR     # 1 = fixed left/right pair, 2 = random positions
+NumBlue = 1            # blue (S-) boxes in the random layout; forced to 1
+                       # in the left/right layout, which shows exactly one
 Subject = "Sbj000"
 MaxTrials = 60         # first presentations; correction trials do not count
 LimitedHold = 25       # seconds the animal has to respond, each of the two steps
@@ -104,13 +137,22 @@ records = []               # per-trial dicts, also written to CSV as we go
 session_start = 0.0
 side_history = []          # realised L/R sequence, for the run-length cap and audit
 
-# Per-presentation state
+# Per-presentation state.
+#
+# Boxes are identified by integer slot, 0..MAX_BOXES-1, in both layouts: the
+# left/right pair is slots 0 and 1 pinned to CHOICE_POS. Keying on slots
+# rather than "L"/"R" is what lets one set of choice/scoring code serve both
+# layouts. Sides are derived from a box's position when a row is written, so
+# CorrectSide and ChosenSide still mean what they always did.
 is_correction = False
 sample_color = ""          # priming square colour; blank in Testing
-correct_side = "L"
-choice_colors = {"L": S_PLUS, "R": S_MINUS}
+correct_slot = 0           # slot showing S+ this presentation
+correct_side = "L"         # screen half that slot landed in
+choice_slots = [0, 1]      # slots in play this presentation
+choice_places = {0: CHOICE_POS["L"], 1: CHOICE_POS["R"]}   # slot -> (relx, rely)
+choice_colors = {0: S_PLUS, 1: S_MINUS}
 active_choices = set()     # which choice frames currently accept a press
-fr_count = {"centre": 0, "L": 0, "R": 0}
+fr_count = {"centre": 0}
 centre_onset = 0.0
 choice_onset = 0.0
 start_latency = 0.0
@@ -140,6 +182,122 @@ def next_side():
     return random.choice(["L", "R"])
 
 
+def side_of(pos):
+    """Screen half a box centre falls in, for the protocol 8.4 bias check.
+
+    A box centred exactly on the midline counts as right. That is arbitrary,
+    and it only arises in the random layout; any analysis that turns on it
+    should use the logged ChosenX rather than this column.
+    """
+    return "L" if pos[0] < 0.5 else "R"
+
+
+def _overlaps(a, b, w, h, gap):
+    """True if two same-sized boxes centred at a and b are closer than gap."""
+    return abs(a[0] - b[0]) < w + gap and abs(a[1] - b[1]) < h + gap
+
+
+def _grid_slots(w, h, gap, margin):
+    """Evenly spaced non-overlapping centres, used only as a fallback."""
+    step_x, step_y = w + gap, h + gap
+    lo_x, hi_x = margin + w / 2.0, 1.0 - margin - w / 2.0
+    lo_y, hi_y = margin + h / 2.0, 1.0 - margin - h / 2.0
+    cols = max(1, int((hi_x - lo_x) / step_x) + 1)
+    rows = max(1, int((hi_y - lo_y) / step_y) + 1)
+    xs = [lo_x + i * step_x for i in range(cols)]
+    ys = [lo_y + j * step_y for j in range(rows)]
+    return [(x, y) for y in ys for x in xs]
+
+
+def random_positions(n):
+    """n non-overlapping box centres, in relative screen coordinates.
+
+    Rejection sampling rather than jittered grid cells: cells would leave the
+    boxes in visibly regular rows and columns, which gives position a
+    structure the animal could learn even though it does not predict the S+.
+
+    Boxes are kept RANDOM_MIN_GAP apart rather than merely not overlapping,
+    so two boxes never render as one wide block, and RANDOM_EDGE_MARGIN off
+    the edges so none is clipped by the screen bounds.
+
+    Falls back to a shuffled grid only if sampling cannot place n boxes,
+    which with the default constants does not happen -- it is there so that
+    raising RANDOM_CHOICE_SIZE degrades into regular positions instead of
+    hanging or overlapping.
+    """
+    w, h = RANDOM_CHOICE_SIZE
+    gap, margin = RANDOM_MIN_GAP, RANDOM_EDGE_MARGIN
+    lo_x, hi_x = margin + w / 2.0, 1.0 - margin - w / 2.0
+    lo_y, hi_y = margin + h / 2.0, 1.0 - margin - h / 2.0
+
+    for _ in range(RANDOM_RESTARTS):
+        placed = []
+        for _ in range(n):
+            for _ in range(RANDOM_TRIES):
+                cand = (random.uniform(lo_x, hi_x), random.uniform(lo_y, hi_y))
+                if all(not _overlaps(cand, q, w, h, gap) for q in placed):
+                    placed.append(cand)
+                    break
+            else:
+                break          # this box would not fit; restart the layout
+        if len(placed) == n:
+            return placed
+
+    slots = _grid_slots(w, h, gap, margin)
+    if len(slots) < n:
+        print(f"[LAYOUT] WARNING only {len(slots)} non-overlapping positions "
+              f"fit {n} boxes of {RANDOM_CHOICE_SIZE}; boxes WILL overlap. "
+              f"Lower RANDOM_CHOICE_SIZE or show fewer blue boxes.")
+        return [(random.uniform(lo_x, hi_x), random.uniform(lo_y, hi_y))
+                for _ in range(n)]
+    random.shuffle(slots)
+    return slots[:n]
+
+
+def build_layout():
+    """Pick this trial's box positions, colours and which box is S+.
+
+    Called for first presentations only. A correction trial reuses whatever
+    this left behind, so it repeats the identical screen -- same count, same
+    positions, same correct box -- in both layouts.
+    """
+    global correct_slot, correct_side, choice_slots, choice_places, choice_colors
+
+    if Layout == LAYOUT_RANDOM:
+        n = int(NumBlue) + 1
+        choice_slots = list(range(n))
+        wanted = next_side()
+        # The run-length cap (protocol 8.1) still applies. It is applied by
+        # choosing WHICH placed box turns yellow, not by constraining where
+        # boxes may go -- constraining placement directly would leave a
+        # learnable hole in the position distribution.
+        #
+        # That only works if some box actually landed in the half the cap
+        # asks for, which with two boxes often fails; left alone, same-half
+        # runs of six were reaching the animal. So redraw the whole screen
+        # until the wanted half is represented. Positions stay uniform
+        # within any one layout, and the only layouts made rarer are the
+        # ones that would break the cap, which is what the cap is for.
+        positions = random_positions(n)
+        for _ in range(RANDOM_RESTARTS):
+            if any(side_of(pos) == wanted for pos in positions):
+                break
+            positions = random_positions(n)
+        choice_places = dict(zip(choice_slots, positions))
+        candidates = [s for s in choice_slots
+                      if side_of(choice_places[s]) == wanted] or choice_slots
+        correct_slot = random.choice(candidates)
+    else:
+        choice_slots = [0, 1]
+        choice_places = {0: CHOICE_POS["L"], 1: CHOICE_POS["R"]}
+        correct_slot = 0 if next_side() == "L" else 1
+
+    choice_colors = {s: (S_PLUS if s == correct_slot else S_MINUS)
+                     for s in choice_slots}
+    correct_side = side_of(choice_places[correct_slot])
+    side_history.append(correct_side)
+
+
 # ---------------------------------------------------------------------------
 # Data logging
 
@@ -158,15 +316,60 @@ def session_csv_path():
 #                Testing, which shows no priming screen.
 # StartLatency and the "start" omission likewise only occur in Transitional;
 # in Testing they are blank and zero, since there is nothing to start.
+# The randomized layout adds a second block of columns, appended after the
+# original set so the old columns keep their order and position:
+#   Layout       "LeftRight" or "Random".
+#   NumBlue      blue boxes shown; always 1 in the left/right layout.
+#   BoxesLeft    how many of this trial's boxes fell in the left half. Chance
+#                left-choice rate is not 50% in the random layout, so a side
+#                bias can only be judged against what was actually offered.
+#   CorrectX/Y, ChosenX/Y   box centres in relative screen coordinates, for
+#                the spatial analyses the L/R columns are too coarse for.
 TRIAL_COLUMNS = ["Subject", "Date", "Phase", "Trial", "Presentation",
                  "SampleColor", "CorrectSide", "ChosenSide", "ChosenColor",
                  "Correct", "StartLatency", "ChoiceLatency", "Omission",
-                 "PelletsCommanded"]
+                 "PelletsCommanded",
+                 "Layout", "NumBlue", "BoxesLeft",
+                 "CorrectX", "CorrectY", "ChosenX", "ChosenY"]
 
 SESSION_COLUMNS = ["Subject", "Date", "Phase", "TrialsCompleted",
                    "FirstPresAccuracy", "LeftChoicePct", "CorrectionTrials",
                    "StartOmissions", "ChoiceOmissions", "MedianStartLatency",
-                   "MedianChoiceLatency", "PelletsCommanded"]
+                   "MedianChoiceLatency", "PelletsCommanded",
+                   "Layout", "NumBlue"]
+
+
+def append_path(path, columns):
+    """Where to append, given a file that may carry an older header.
+
+    Appending these wider rows to a file written before the randomized
+    layout existed would leave the header naming 14 fields and every row
+    after it carrying 21: the new values land under no header at all and the
+    file reads as valid CSV, so nothing would flag it. When the header on
+    disk is not the one about to be written, roll over to a numbered sibling
+    and say so rather than corrupting the existing file.
+    """
+    if not os.path.isfile(path):
+        return path
+    try:
+        with open(path, newline="") as f:
+            if next(csv.reader(f), []) == columns:
+                return path
+    except OSError:
+        return path
+
+    stem, ext = os.path.splitext(path)
+    n = 2
+    while True:
+        alt = f"{stem}_v{n}{ext}"
+        if not os.path.isfile(alt):
+            print(f"[DATA] {os.path.basename(path)} was written with an older "
+                  f"column set; this session goes to {os.path.basename(alt)}")
+            return alt
+        with open(alt, newline="") as f:
+            if next(csv.reader(f), []) == columns:
+                return alt
+        n += 1
 
 
 def write_row(row):
@@ -175,7 +378,7 @@ def write_row(row):
     Motor_Task_Acc.py:95-101 opens in append mode and never writes a header,
     which is why Data/Sbj258.csv is bare numeric rows. Don't repeat that.
     """
-    path = trial_csv_path()
+    path = append_path(trial_csv_path(), TRIAL_COLUMNS)
     new_file = not os.path.isfile(path)
     with open(path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=TRIAL_COLUMNS)
@@ -184,8 +387,14 @@ def write_row(row):
         writer.writerow(row)
 
 
-def record(presentation, chosen_side, correct, omission, choice_latency):
-    """Build, store and persist one trial record."""
+def record(presentation, chosen_slot, correct, omission, choice_latency):
+    """Build, store and persist one trial record.
+
+    chosen_slot is None on an omission. It is compared against None rather
+    than tested for truth throughout: slot 0 is a real box.
+    """
+    chosen_pos = choice_places[chosen_slot] if chosen_slot is not None else None
+    correct_pos = choice_places[correct_slot]
     row = {
         "Subject": Subject,
         "Date": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -194,13 +403,21 @@ def record(presentation, chosen_side, correct, omission, choice_latency):
         "Presentation": presentation,
         "SampleColor": sample_color,
         "CorrectSide": correct_side,
-        "ChosenSide": chosen_side,
-        "ChosenColor": choice_colors[chosen_side] if chosen_side else "",
+        "ChosenSide": side_of(chosen_pos) if chosen_pos is not None else "",
+        "ChosenColor": choice_colors[chosen_slot] if chosen_slot is not None else "",
         "Correct": "" if omission != "none" else int(correct),
         "StartLatency": round(start_latency, 3) if start_latency else "",
         "ChoiceLatency": round(choice_latency, 3) if choice_latency else "",
         "Omission": omission,
         "PelletsCommanded": pellets_commanded,
+        "Layout": LAYOUT_LABELS[Layout],
+        "NumBlue": len(choice_slots) - 1,
+        "BoxesLeft": sum(1 for s in choice_slots
+                         if side_of(choice_places[s]) == "L"),
+        "CorrectX": round(correct_pos[0], 4),
+        "CorrectY": round(correct_pos[1], 4),
+        "ChosenX": round(chosen_pos[0], 4) if chosen_pos is not None else "",
+        "ChosenY": round(chosen_pos[1], 4) if chosen_pos is not None else "",
     }
     records.append(row)
     write_row(row)
@@ -233,11 +450,13 @@ def summarise():
         "MedianStartLatency": round(statistics.median(start_lats), 2) if start_lats else "",
         "MedianChoiceLatency": round(statistics.median(choice_lats), 2) if choice_lats else "",
         "PelletsCommanded": pellets_commanded,
+        "Layout": LAYOUT_LABELS[Layout],
+        "NumBlue": int(NumBlue) if Layout == LAYOUT_RANDOM else 1,
     }
 
 
 def write_session(summary):
-    path = session_csv_path()
+    path = append_path(session_csv_path(), SESSION_COLUMNS)
     new_file = not os.path.isfile(path)
     with open(path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=SESSION_COLUMNS)
@@ -329,9 +548,12 @@ def paint_color(widget, color):
 
 
 def clear_screen():
+    # Every frame in the pool, not just this trial's slots: the blue-box
+    # count can only change between sessions, but clearing the pool keeps
+    # this correct if that ever stops being true.
     centre_btn.place_forget()
-    for side in ("L", "R"):
-        choice_btn[side].place_forget()
+    for slot in range(MAX_BOXES):
+        choice_btn[slot].place_forget()
     gui.update()
 
 
@@ -347,7 +569,7 @@ def cancel_timeout():
 
 def trial_setup(correction=False):
     """Start a trial. A correction trial repeats the previous parameters."""
-    global trial, is_correction, sample_color, correct_side, choice_colors
+    global trial, is_correction, sample_color
     global fr_count, centre_onset, awaiting, start_latency
 
     if shutting_down:
@@ -364,18 +586,17 @@ def trial_setup(correction=False):
             return
 
         trial += 1
-        correct_side = next_side()
-        side_history.append(correct_side)
 
-        # Yellow is correct in both stages; only the side moves. The priming
+        # Yellow is correct in both stages and both layouts; all that moves
+        # is where it sits and how many blue boxes sit beside it. The priming
         # square is logged as the sample in Transitional so the column says
         # what the animal was shown before the choice.
         sample_color = S_PLUS if Stage == TRANSITIONAL else ""
-        choice_colors = {correct_side: S_PLUS,
-                         ("R" if correct_side == "L" else "L"): S_MINUS}
+        build_layout()
 
     is_correction = correction
-    fr_count = {"centre": 0, "L": 0, "R": 0}
+    fr_count = {"centre": 0}
+    fr_count.update({slot: 0 for slot in range(MAX_BOXES)})
     start_latency = 0.0
 
     play_sound('7500.long.wav')  # long tone signals trial start
@@ -439,24 +660,30 @@ def centre_pressed(_event=None):
 
 
 def present_choices():
-    """Show the yellow/blue pair and open the choice window.
+    """Show this trial's boxes and open the choice window.
 
     Reached from the priming press in Transitional and straight from
     trial_setup() in Testing, so the choice step itself is identical in the
-    two stages -- same geometry, same limited hold, same scoring.
+    two stages -- same geometry, same limited hold, same scoring. It is also
+    the single place either layout is drawn: build_layout() has already
+    decided how many boxes there are and where they go, so nothing below
+    depends on which layout is running.
     """
     global awaiting, choice_onset, active_choices
 
-    # On a correction trial the incorrect option is displayed but inactive --
-    # it still absorbs the touch, it just does not respond.
-    for side in ("L", "R"):
-        choice_btn[side].place(relx=CHOICE_POS[side][0], rely=CHOICE_POS[side][1],
-                               relwidth=CHOICE_SIZE[0], relheight=CHOICE_SIZE[1],
+    size = RANDOM_CHOICE_SIZE if Layout == LAYOUT_RANDOM else CHOICE_SIZE
+
+    # On a correction trial the incorrect options are displayed but inactive
+    # -- they still absorb the touch, they just do not respond.
+    for slot in choice_slots:
+        relx, rely = choice_places[slot]
+        choice_btn[slot].place(relx=relx, rely=rely,
+                               relwidth=size[0], relheight=size[1],
                                anchor="center")
-    # Colour only once both frames are mapped -- see paint_color().
-    for side in ("L", "R"):
-        paint_color(choice_btn[side], choice_colors[side])
-    active_choices = {correct_side} if is_correction else {"L", "R"}
+    # Colour only once every frame is mapped -- see paint_color().
+    for slot in choice_slots:
+        paint_color(choice_btn[slot], choice_colors[slot])
+    active_choices = {correct_slot} if is_correction else set(choice_slots)
     gui.update()
 
     awaiting = "choice"
@@ -464,21 +691,22 @@ def present_choices():
     arm_timeout("choice")
 
 
-def choice_pressed(side):
+def choice_pressed(slot):
     """A choice box was touched."""
     global awaiting
 
-    if awaiting != "choice" or side not in active_choices:
+    if awaiting != "choice" or slot not in active_choices:
         return
 
-    fr_count[side] += 1
-    # The FR must be completed on a single button: touching the other choice
+    fr_count[slot] += 1
+    # The FR must be completed on a single button: touching any other choice
     # resets this one's partial count. [SET LOCALLY] -- Ao et al. do not
     # specify how partial runs across buttons should be handled.
-    other = "R" if side == "L" else "L"
-    fr_count[other] = 0
+    for other in choice_slots:
+        if other != slot:
+            fr_count[other] = 0
 
-    if fr_count[side] < FRChoice:
+    if fr_count[slot] < FRChoice:
         # Sub-criterion presses are SILENT, with a neutral flash identical on
         # both buttons. Two separate reasons:
         #   - the correct/incorrect tones here would tell the pig the answer
@@ -495,12 +723,12 @@ def choice_pressed(side):
     awaiting = "none"
     latency = perf_counter() - choice_onset
     clear_screen()
-    outcome(side, latency)
+    outcome(slot, latency)
 
 
-def outcome(chosen_side, latency):
+def outcome(chosen_slot, latency):
     """Score the choice, reinforce or not, then queue what comes next."""
-    correct = (chosen_side == correct_side)
+    correct = (chosen_slot == correct_slot)
     presentation = "correction" if is_correction else "first"
 
     if correct:
@@ -508,11 +736,11 @@ def outcome(chosen_side, latency):
         # Reinforce before recording so PelletsCommanded on this row is the
         # session total including this trial's pellets.
         reinforcement()
-        record(presentation, chosen_side, True, "none", latency)
+        record(presentation, chosen_slot, True, "none", latency)
         next_trial()
     else:
         play_sound('290.short.wav')
-        record(presentation, chosen_side, False, "none", latency)
+        record(presentation, chosen_slot, False, "none", latency)
         # Correction trials are optional in both stages. They repeat the
         # identical trial -- priming screen included, in Transitional -- until
         # the pig chooses correctly, so no repeat cap is imposed; an omission
@@ -535,7 +763,7 @@ def omission(kind):
     # StartLatency survives on a "choice" omission in Transitional -- the pig
     # did press the priming square -- and is logged blank on a "start"
     # omission, and throughout Testing.
-    record(presentation, "", False, kind, 0.0)
+    record(presentation, None, False, kind, 0.0)
     print(f"[OMISSION] trial {trial}: {kind}")
     # An omission ends any correction sequence and moves to a fresh trial.
     next_trial(shortened=True)
@@ -610,9 +838,15 @@ def settings():
 
     def update_vals():
         global Stage, Subject, MaxTrials, LimitedHold, FRCentre, FRChoice, \
-            ReinfAmt, Blackout, Correction, SessionCap, ShowCursor
+            ReinfAmt, Blackout, Correction, SessionCap, ShowCursor, \
+            Layout, NumBlue
 
         Stage = int(stage_var.get())
+        Layout = (LAYOUT_RANDOM if layout_var.get() == LAYOUT_MENU[LAYOUT_RANDOM]
+                  else LAYOUT_LR)
+        # The left/right layout shows exactly one blue box whatever the menu
+        # was left on, so NumBlue always matches what was actually displayed.
+        NumBlue = int(blue_var.get()) if Layout == LAYOUT_RANDOM else 1
         Subject = e_subj.get().strip() or "Sbj000"
         MaxTrials = int(float(e_trials.get()))
         LimitedHold = float(e_hold.get())
@@ -633,6 +867,12 @@ def settings():
         e_frc.config(state=("normal" if int(stage_var.get()) == TRANSITIONAL
                             else "disabled"))
 
+    def layout_defaults():
+        """Grey out the blue-box count outside the randomized layout."""
+        blue_menu.config(
+            state=("normal" if layout_var.get() == LAYOUT_MENU[LAYOUT_RANDOM]
+                   else "disabled"))
+
     popup = tk.Tk()
     popup.title("Colour Discrimination - Transitional / Testing")
     width = popup.winfo_screenwidth()
@@ -650,7 +890,7 @@ def settings():
     labels = [
         ("Subject:", 1), ("Trials\n(first presentations):", 2),
         ("Limited\nHold (s):", 3), ("FR priming\n(Transitional only):", 4),
-        ("FR choice:", 5),
+        ("FR choice:", 5), ("Choice layout:", 6),
     ]
     for text, row in labels:
         tk.Label(popup, text=text, font=24).grid(row=row, column=3, padx=2, pady=15)
@@ -658,7 +898,7 @@ def settings():
     labels2 = [
         ("Pellets per\ncorrect:", 1), ("Blackout (min):", 2),
         ("Session cap\n(min):", 3), ("Correction trials:", 4),
-        ("Mouse cursor:", 5),
+        ("Mouse cursor:", 5), ("Blue boxes\n(random layout only):", 6),
     ]
     for text, row in labels2:
         tk.Label(popup, text=text, font=24).grid(row=row, column=5, padx=2, pady=15)
@@ -687,6 +927,24 @@ def settings():
     cursor_var.set("Visible" if ShowCursor else "Hidden")
     OptionMenu(popup, cursor_var, "Hidden", "Visible").grid(row=5, column=6, padx=2, pady=10)
 
+    # Left / Right is the original two-box task and stays the default, so an
+    # experimenter who opens this window and presses Start gets the session
+    # the program has always run.
+    layout_var = StringVar(popup)
+    layout_var.set(LAYOUT_MENU[Layout])
+    OptionMenu(popup, layout_var, LAYOUT_MENU[LAYOUT_LR],
+               LAYOUT_MENU[LAYOUT_RANDOM],
+               command=lambda _choice: layout_defaults()) \
+        .grid(row=6, column=4, padx=2, pady=10)
+
+    # A menu rather than a free entry: 0 blue boxes is not a discrimination
+    # and more than MAX_BLUE will not fit on screen without overlapping.
+    blue_var = StringVar(popup)
+    blue_var.set(str(NumBlue))
+    blue_menu = OptionMenu(popup, blue_var,
+                           *[str(n) for n in range(1, MAX_BLUE + 1)])
+    blue_menu.grid(row=6, column=6, padx=2, pady=10)
+
     e_subj.insert(0, Subject)
     e_trials.insert(0, str(MaxTrials))
     e_hold.insert(0, str(LimitedHold))
@@ -696,12 +954,13 @@ def settings():
     e_black.insert(0, str(Blackout))
     e_cap.insert(0, str(SessionCap))
     stage_defaults()
+    layout_defaults()
 
     tk.Button(popup, text="Start", command=setup, font=("bold", "14"),
-              height=3, width=12).grid(row=6, column=1, columnspan=2, pady=20)
+              height=3, width=12).grid(row=7, column=1, columnspan=2, pady=20)
 
     popup.grid_rowconfigure(0, weight=1)
-    popup.grid_rowconfigure(7, weight=1)
+    popup.grid_rowconfigure(8, weight=1)
     popup.grid_columnconfigure(0, weight=1)
     popup.grid_columnconfigure(7, weight=1)
 
@@ -736,7 +995,12 @@ def report_end():
     panel = tk.Frame(gui)
     panel.place(relx=0, rely=0, relwidth=1, relheight=1)
 
-    tk.Label(panel, text=f"{Subject}  -  {STAGE_LABELS[Stage]} stage",
+    if Layout == LAYOUT_RANDOM:
+        layout_note = f"random positions, {int(NumBlue)} blue"
+    else:
+        layout_note = "left / right"
+    tk.Label(panel,
+             text=f"{Subject}  -  {STAGE_LABELS[Stage]} stage  -  {layout_note}",
              font=("Bold", 30)).grid(row=1, column=1, columnspan=3, pady=20)
 
     cells = [
@@ -756,10 +1020,17 @@ def report_end():
         tk.Label(panel, text=label, font=("Bold", 20)).grid(row=row, column=col, padx=15, pady=5)
         tk.Label(panel, text=str(value), font=("Arial", 26)).grid(row=row + 1, column=col, padx=15, pady=5)
 
-    # Side bias reading, per the table in protocol 8.4.
+    # Side bias reading, per the table in protocol 8.4. The thresholds there
+    # assume the two-box left/right screen, where an unbiased animal chooses
+    # each half half the time. In the random layout the boxes themselves are
+    # not split evenly between the halves, so chance left-choice rate is not
+    # 50% and these cut-offs do not apply -- the per-trial BoxesLeft and
+    # ChosenX columns are what a bias test should be run against instead.
     left = summary["LeftChoicePct"]
     if summary["TrialsCompleted"] == 0:
         note = ""
+    elif Layout == LAYOUT_RANDOM:
+        note = "Random layout - judge side bias from BoxesLeft / ChosenX"
     elif left > 75 or left < 25:
         note = "ESTABLISHED SIDE BIAS"
     elif left > 60 or left < 40:
@@ -802,16 +1073,20 @@ with device:
     start_button = tk.Button(gui, text="START", font=("bold", "40"), command=lambda: start())
     start_button.place(relheight=1, relwidth=1, relx=1, rely=0, anchor="ne")
 
-    # centre start box and the two choice boxes
+    # centre start box and the pool of choice boxes
     centre_btn = tk.Frame(gui, bg=S_PLUS)
     centre_btn.bind("<Button-1>", centre_pressed)
 
-    choice_btn = {
-        "L": tk.Frame(gui, bg=S_PLUS),
-        "R": tk.Frame(gui, bg=S_MINUS),
-    }
-    choice_btn["L"].bind("<Button-1>", lambda e: choice_pressed("L"))
-    choice_btn["R"].bind("<Button-1>", lambda e: choice_pressed("R"))
+    # One frame per slot, built once and re-placed each trial. MAX_BOXES of
+    # them regardless of layout or blue-box count, so nothing is created
+    # mid-session; unused slots are simply never placed. Bind the slot as a
+    # default argument, not by closing over the loop variable, or every frame
+    # would report the last slot.
+    choice_btn = {}
+    for _slot in range(MAX_BOXES):
+        _frame = tk.Frame(gui, bg=S_MINUS)
+        _frame.bind("<Button-1>", lambda e, s=_slot: choice_pressed(s))
+        choice_btn[_slot] = _frame
 
     # small quit button in the corner, same placement as the other programs
     quit_btn = tk.Button(gui, bg="gray10", highlightbackground="gray10",
