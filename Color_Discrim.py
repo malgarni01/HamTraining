@@ -168,18 +168,23 @@ shutting_down = False      # set once the session is over; makes the exit
 # ---------------------------------------------------------------------------
 # Side assignment
 
-def next_side():
-    """Pseudorandom L/R with a run-length cap (protocol 8.1).
+def forced_side():
+    """The side the run-length cap (protocol 8.1) requires, or None.
 
-    Free choice unless the last MAX_SAME_SIDE trials all used the same side,
-    in which case the other side is forced. Keeping the realised sequence in
-    side_history lets 8.4's side-bias check be audited after the fact.
+    Once the last MAX_SAME_SIDE trials all used the same side, the next one
+    must use the other. Keeping the realised sequence in side_history lets
+    8.4's side-bias check be audited after the fact.
     """
     if len(side_history) >= MAX_SAME_SIDE:
         tail = side_history[-MAX_SAME_SIDE:]
         if all(s == tail[0] for s in tail):
             return "R" if tail[0] == "L" else "L"
-    return random.choice(["L", "R"])
+    return None
+
+
+def next_side():
+    """Pseudorandom L/R: free choice unless forced_side() says otherwise."""
+    return forced_side() or random.choice(["L", "R"])
 
 
 def side_of(pos):
@@ -266,27 +271,29 @@ def build_layout():
     if Layout == LAYOUT_RANDOM:
         n = int(NumBlue) + 1
         choice_slots = list(range(n))
-        wanted = next_side()
-        # The run-length cap (protocol 8.1) still applies. It is applied by
-        # choosing WHICH placed box turns yellow, not by constraining where
-        # boxes may go -- constraining placement directly would leave a
-        # learnable hole in the position distribution.
+        # Yellow is drawn uniformly from ALL placed boxes. An earlier version
+        # picked a side first and then a box within it, which gave each half
+        # 50% however many boxes it held: a box alone in its half was yellow
+        # 50% of the time against a fair 1/n, a cue the animal could use
+        # without seeing colour. Drawn uniformly, yellow still lands left 50%
+        # of the time, because the boxes are spread evenly.
         #
-        # That only works if some box actually landed in the half the cap
-        # asks for, which with two boxes often fails; left alone, same-half
-        # runs of six were reaching the animal. So redraw the whole screen
-        # until the wanted half is represented. Positions stay uniform
-        # within any one layout, and the only layouts made rarer are the
-        # ones that would break the cap, which is what the cap is for.
-        positions = random_positions(n)
+        # The run-length cap (protocol 8.1) is enforced by redrawing the
+        # whole screen -- positions and yellow together -- until yellow falls
+        # in the half the cap requires. Redrawing both keeps yellow uniform
+        # among the boxes on screen; choosing only among boxes in the forced
+        # half would bring the lone-box cue back on those trials.
+        wanted = forced_side()
         for _ in range(RANDOM_RESTARTS):
-            if any(side_of(pos) == wanted for pos in positions):
-                break
             positions = random_positions(n)
+            correct_slot = random.choice(choice_slots)
+            if wanted is None or side_of(positions[correct_slot]) == wanted:
+                break
+        else:
+            print(f"[LAYOUT] WARNING could not honour the same-side cap "
+                  f"after {RANDOM_RESTARTS} redraws; this trial may extend "
+                  f"the run.")
         choice_places = dict(zip(choice_slots, positions))
-        candidates = [s for s in choice_slots
-                      if side_of(choice_places[s]) == wanted] or choice_slots
-        correct_slot = random.choice(candidates)
     else:
         choice_slots = [0, 1]
         choice_places = {0: CHOICE_POS["L"], 1: CHOICE_POS["R"]}
