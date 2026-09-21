@@ -437,7 +437,7 @@ def stage_0():
             # if max number of stage 0 responses is exceeded, begin stage 1, else loop
             if stage_0_responses >= Stage0Resp:
                 gui.update()
-                stage_1_setup()
+                enter_stage(1)
             else:
                 stage_0_setup()
 
@@ -521,7 +521,7 @@ def stage_1():
             if stage_1_responses >= Stage1Resp:
                 resp_btn.place_forget()
                 gui.update()
-                stage_2_setup()
+                enter_stage(2)
             else:
                 stage_1_setup()
 
@@ -577,7 +577,7 @@ def stage_2():
             if stage_2_responses >= Stage2Resp:
                 resp_btn.place_forget()
                 gui.update()
-                stage_3_setup()
+                enter_stage(3)
             else:
                 stage_2_setup()
 
@@ -632,7 +632,7 @@ def stage_3():
             # stage 4 if max stage 3 responses is reached
             if stage_3_responses >= Stage3Resp:
                 resp_btn.place_forget()
-                stage_4_setup()
+                enter_stage(4)
             else:
                 stage_3_setup()
 
@@ -789,19 +789,25 @@ def report():
 def end_program():
     pass
 
+# Moves the session into a stage, used at the start and at each hand-over.
+# A stage whose response count is set to 0 (or less) in the settings is
+# skipped completely: no trials run and nothing is recorded for it. If every
+# remaining stage is skipped, the session ends as it does after Stage 4.
+def enter_stage(stage):
+    setups = [stage_0_setup, stage_1_setup, stage_2_setup, stage_3_setup, stage_4_setup]
+    counts = [Stage0Resp, Stage1Resp, Stage2Resp, Stage3Resp, Stage4Resp]
+    for s in range(stage, len(setups)):
+        if counts[s] > 0:
+            setups[s]()
+            return
+        print(f"stage {s} skipped (responses set to 0)")
+    play_sound('end_tone.wav')  # play tone for end
+    exit_program()
+
 # setup function, called on program start
 def start():
     def full_start():
-        if StartStage == 0:
-            stage_0_setup()
-        if StartStage == 1:
-            stage_1_setup()
-        if StartStage == 2:
-            stage_2_setup()
-        if StartStage == 3:
-            stage_3_setup()
-        if StartStage == 4:
-            stage_4_setup()
+        enter_stage(StartStage)
 
     start_button.destroy()
     gui.after(int(Blackout * 60 * 1000), full_start)
