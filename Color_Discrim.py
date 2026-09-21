@@ -118,6 +118,9 @@ Layout = LAYOUT_LR     # 1 = fixed left/right pair, 2 = random positions
 NumBlue = 1            # blue (S-) boxes in the random layout; forced to 1
                        # in the left/right layout, which shows exactly one
 Subject = "Sbj000"
+SessionDate = datetime.date.today().strftime("%m-%d-%Y")  # MM-DD-YYYY, for the trial file name;
+                                                 # fixed at Start so a session running
+                                                 # past midnight stays in one file
 MaxTrials = 60         # first presentations; correction trials do not count
 LimitedHold = 25       # seconds the animal has to respond, each of the two steps
 FRCentre = 1           # presses required on the priming square (Transitional only)
@@ -309,7 +312,7 @@ def build_layout():
 # Data logging
 
 def trial_csv_path():
-    return os.path.join(get_data_dir(), f"{Subject}_discrim.csv")
+    return os.path.join(get_data_dir(), f"{Subject}_{SessionDate}_discrim.csv")
 
 
 def session_csv_path():
@@ -846,7 +849,7 @@ def settings():
     def update_vals():
         global Stage, Subject, MaxTrials, LimitedHold, FRCentre, FRChoice, \
             ReinfAmt, Blackout, Correction, SessionCap, ShowCursor, \
-            Layout, NumBlue
+            Layout, NumBlue, SessionDate
 
         Stage = int(stage_var.get())
         Layout = (LAYOUT_RANDOM if layout_var.get() == LAYOUT_MENU[LAYOUT_RANDOM]
@@ -855,6 +858,7 @@ def settings():
         # was left on, so NumBlue always matches what was actually displayed.
         NumBlue = int(blue_var.get()) if Layout == LAYOUT_RANDOM else 1
         Subject = e_subj.get().strip() or "Sbj000"
+        SessionDate = datetime.date.today().strftime("%m-%d-%Y")
         MaxTrials = int(float(e_trials.get()))
         LimitedHold = float(e_hold.get())
         FRCentre = int(float(e_frc.get()))

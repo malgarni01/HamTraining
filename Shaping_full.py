@@ -100,6 +100,9 @@ shutting_down = False   # set once the session is over; makes the exit path
 
 # Default Settings (Can be modified)
 Subject = "Sbj000"
+SessionDate = datetime.date.today().strftime("%m-%d-%Y")  # MM-DD-YYYY, for the trial file name;
+                                                 # fixed at Start so a session running
+                                                 # past midnight stays in one file
 Autoshape = 1  # if this variable is set to 1, goes to autoshaping for stage 0, otherwise does keyboard hand shaping
 DelivTimer = 30  # stage 0 and stage 2 timeout value for timer
 LimitedHold = 25	#Time which animal has to respond
@@ -286,7 +289,7 @@ def reinforcement():
 # Data logging
 #
 # Same layout as Color_Discrim.py: one row per trial is appended to
-# Data/<Subject>_shaping.csv as the session runs, and one summary row per
+# Data/<Subject>_<MM-DD-YYYY>_shaping.csv as the session runs, and one summary row per
 # session to Data/<Subject>_shaping_sessions.csv when the session is exited.
 # These functions only read program state; they do not change the task.
 #
@@ -304,7 +307,7 @@ def reinforcement():
 # as fractions of the screen; BoxRelWidth/BoxRelHeight are its size.
 
 def trial_csv_path():
-    return os.path.join(get_data_dir(), f"{Subject}_shaping.csv")
+    return os.path.join(get_data_dir(), f"{Subject}_{SessionDate}_shaping.csv")
 
 
 def session_csv_path():
@@ -811,8 +814,10 @@ def settings():
     # gets current values for all variables listed below
     def update_vals():
         global DelivTimer, LimitedHold, Stage0Resp, Stage1Resp, Stage2Resp, Stage3Resp, \
-            Stage4Resp, StartStage, Blackout, Autoshape, fr_req, Subject, ShowCursor
+            Stage4Resp, StartStage, Blackout, Autoshape, fr_req, Subject, ShowCursor, \
+            SessionDate
         Subject = e_subj.get().strip() or "Sbj000"
+        SessionDate = datetime.date.today().strftime("%m-%d-%Y")
         DelivTimer = float(e4.get())
         LimitedHold = float(e5.get())
         Blackout = float(e6.get())
