@@ -44,7 +44,8 @@ import random
 import statistics
 import sys
 from iointerface_api import *
-from platform_config import play_sound, ensure_sound_files, get_data_dir
+from platform_config import (play_sound, ensure_sound_files, get_data_dir,
+                             get_backup_data_dir)
 
 ensure_sound_files()
 
@@ -388,13 +389,34 @@ def write_row(row):
     Motor_Task_Acc.py:95-101 opens in append mode and never writes a header,
     which is why Data/Sbj258.csv is bare numeric rows. Don't repeat that.
     """
-    path = append_path(trial_csv_path(), TRIAL_COLUMNS)
+    append_row(trial_csv_path(), TRIAL_COLUMNS, row)
+    append_backup(trial_csv_path(), TRIAL_COLUMNS, row)
+
+
+def append_row(path, columns, row):
+    """Append one row to path (or its rollover, see append_path), writing
+    the header if the file is new."""
+    path = append_path(path, columns)
     new_file = not os.path.isfile(path)
     with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=TRIAL_COLUMNS)
+        writer = csv.DictWriter(f, fieldnames=columns)
         if new_file:
             writer.writeheader()
         writer.writerow(row)
+
+
+def append_backup(path, columns, row):
+    """Append the same row to the matching file in BACKUP_DATA_DIR (set in
+    platform_config.py), if one is set. Called after the Data/ copy is
+    written; a failure here (drive unplugged, network folder offline) is
+    printed and skipped so it never stops the session."""
+    try:
+        backup_dir = get_backup_data_dir()
+        if backup_dir is None:
+            return
+        append_row(os.path.join(backup_dir, os.path.basename(path)), columns, row)
+    except OSError as e:
+        print(f"[DATA] Could not save backup copy of {os.path.basename(path)}: {e}")
 
 
 def record(presentation, chosen_slot, correct, omission, choice_latency):
@@ -466,13 +488,8 @@ def summarise():
 
 
 def write_session(summary):
-    path = append_path(session_csv_path(), SESSION_COLUMNS)
-    new_file = not os.path.isfile(path)
-    with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=SESSION_COLUMNS)
-        if new_file:
-            writer.writeheader()
-        writer.writerow(summary)
+    append_row(session_csv_path(), SESSION_COLUMNS, summary)
+    append_backup(session_csv_path(), SESSION_COLUMNS, summary)
 
 
 # ---------------------------------------------------------------------------

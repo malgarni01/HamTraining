@@ -21,12 +21,35 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SOUNDS_DIR = os.path.join(_SCRIPT_DIR, "sounds")
 DATA_DIR = os.path.join(_SCRIPT_DIR, "Data")
 
+# Second folder that Shaping_full.py and Color_Discrim.py also save their CSVs
+# to, on top of Data/ above. Leave as "" to save to Data/ only. Examples:
+#   BACKUP_DATA_DIR = r"C:\Users\YourName\Box\HamData"     (Windows)
+#   BACKUP_DATA_DIR = "/Users/yourname/Desktop/HamData"     (Mac)
+# The folder is created if it does not exist.
+BACKUP_DATA_DIR = ""
+
 
 def get_data_dir():
     """Return the data directory path, creating it if needed."""
     if not os.path.isdir(DATA_DIR):
         os.makedirs(DATA_DIR)
     return DATA_DIR
+
+
+def get_backup_data_dir():
+    """Return the backup data directory, creating it if needed, or None if
+    no backup folder is set. Also None when it points at Data/ itself, which
+    would otherwise write every row into the same file twice."""
+    if not BACKUP_DATA_DIR:
+        return None
+    backup = os.path.expanduser(BACKUP_DATA_DIR)
+    same = os.path.normcase(os.path.realpath(backup)) == \
+        os.path.normcase(os.path.realpath(DATA_DIR))
+    if same:
+        return None
+    if not os.path.isdir(backup):
+        os.makedirs(backup)
+    return backup
 
 
 def play_sound(filename):

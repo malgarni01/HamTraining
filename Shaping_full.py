@@ -16,7 +16,8 @@ import datetime
 import os
 import sys
 from iointerface_api import *
-from platform_config import play_sound, ensure_sound_files, get_data_dir
+from platform_config import (play_sound, ensure_sound_files, get_data_dir,
+                             get_backup_data_dir)
 
 ensure_sound_files()
 
@@ -338,6 +339,20 @@ def append_csv(path, columns, row):
         writer.writerow(row)
 
 
+def append_backup(path, columns, row):
+    """Append the same row to the matching file in BACKUP_DATA_DIR (set in
+    platform_config.py), if one is set. Called after the Data/ copy is
+    written; a failure here (drive unplugged, network folder offline) is
+    printed and skipped so it never stops the session."""
+    try:
+        backup_dir = get_backup_data_dir()
+        if backup_dir is None:
+            return
+        append_csv(os.path.join(backup_dir, os.path.basename(path)), columns, row)
+    except OSError as e:
+        print(f"[DATA] Could not save backup copy of {os.path.basename(path)}: {e}")
+
+
 def snapshot_box():
     """Remember where resp_btn was placed this trial. Taken at setup because
     the loops call place_forget() before a trial is recorded."""
@@ -365,6 +380,7 @@ def record(stage, outcome, start_time=None):
     }
     records.append(row)
     append_csv(trial_csv_path(), TRIAL_COLUMNS, row)
+    append_backup(trial_csv_path(), TRIAL_COLUMNS, row)
 
 
 def write_session():
@@ -395,6 +411,7 @@ def write_session():
         "PelletsCommanded": pellets_commanded,
     }
     append_csv(session_csv_path(), SESSION_COLUMNS, summary)
+    append_backup(session_csv_path(), SESSION_COLUMNS, summary)
 
 
 # START MAIN PROGRAM LOOP
