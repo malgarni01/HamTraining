@@ -16,7 +16,8 @@ import datetime
 import os
 import sys
 from iointerface_api import *
-from platform_config import play_sound, ensure_sound_files, get_data_dir
+from platform_config import (play_sound, ensure_sound_files, get_data_dir,
+                             get_backup_data_dir)
 
 ensure_sound_files()
 
@@ -100,6 +101,9 @@ shutting_down = False   # set once the session is over; makes the exit path
 
 # Default Settings (Can be modified)
 Subject = "Sbj000"
+SessionDate = datetime.date.today().strftime("%m-%d-%Y")  # MM-DD-YYYY, for the trial file name;
+                                                 # fixed at Start so a session running
+                                                 # past midnight stays in one file
 Autoshape = 1  # if this variable is set to 1, goes to autoshaping for stage 0, otherwise does keyboard hand shaping
 DelivTimer = 30  # stage 0 and stage 2 timeout value for timer
 LimitedHold = 25	#Time which animal has to respond
@@ -286,7 +290,7 @@ def reinforcement():
 # Data logging
 #
 # Same layout as Color_Discrim.py: one row per trial is appended to
-# Data/<Subject>_shaping.csv as the session runs, and one summary row per
+# Data/<Subject>_<MM-DD-YYYY>_shaping.csv as the session runs, and one summary row per
 # session to Data/<Subject>_shaping_sessions.csv when the session is exited.
 # These functions only read program state; they do not change the task.
 #
@@ -304,7 +308,7 @@ def reinforcement():
 # as fractions of the screen; BoxRelWidth/BoxRelHeight are its size.
 
 def trial_csv_path():
-    return os.path.join(get_data_dir(), f"{Subject}_shaping.csv")
+    return os.path.join(get_data_dir(), f"{Subject}_{SessionDate}_shaping.csv")
 
 
 def session_csv_path():
@@ -335,6 +339,20 @@ def append_csv(path, columns, row):
         writer.writerow(row)
 
 
+def append_backup(path, columns, row):
+    """Append the same row to the matching file in BACKUP_DATA_DIR (set in
+    platform_config.py), if one is set. Called after the Data/ copy is
+    written; a failure here (drive unplugged, network folder offline) is
+    printed and skipped so it never stops the session."""
+    try:
+        backup_dir = get_backup_data_dir()
+        if backup_dir is None:
+            return
+        append_csv(os.path.join(backup_dir, os.path.basename(path)), columns, row)
+    except OSError as e:
+        print(f"[DATA] Could not save backup copy of {os.path.basename(path)}: {e}")
+
+
 def snapshot_box():
     """Remember where resp_btn was placed this trial. Taken at setup because
     the loops call place_forget() before a trial is recorded."""
@@ -362,6 +380,7 @@ def record(stage, outcome, start_time=None):
     }
     records.append(row)
     append_csv(trial_csv_path(), TRIAL_COLUMNS, row)
+    append_backup(trial_csv_path(), TRIAL_COLUMNS, row)
 
 
 def write_session():
@@ -392,6 +411,7 @@ def write_session():
         "PelletsCommanded": pellets_commanded,
     }
     append_csv(session_csv_path(), SESSION_COLUMNS, summary)
+    append_backup(session_csv_path(), SESSION_COLUMNS, summary)
 
 
 # START MAIN PROGRAM LOOP
@@ -434,7 +454,7 @@ def stage_0():
             # if max number of stage 0 responses is exceeded, begin stage 1, else loop
             if stage_0_responses >= Stage0Resp:
                 gui.update()
-                stage_1_setup()
+                enter_stage(1)
             else:
                 stage_0_setup()
 
@@ -518,7 +538,7 @@ def stage_1():
             if stage_1_responses >= Stage1Resp:
                 resp_btn.place_forget()
                 gui.update()
-                stage_2_setup()
+                enter_stage(2)
             else:
                 stage_1_setup()
 
@@ -574,7 +594,7 @@ def stage_2():
             if stage_2_responses >= Stage2Resp:
                 resp_btn.place_forget()
                 gui.update()
-                stage_3_setup()
+                enter_stage(3)
             else:
                 stage_2_setup()
 
@@ -629,7 +649,7 @@ def stage_3():
             # stage 4 if max stage 3 responses is reached
             if stage_3_responses >= Stage3Resp:
                 resp_btn.place_forget()
-                stage_4_setup()
+                enter_stage(4)
             else:
                 stage_3_setup()
 
@@ -786,19 +806,25 @@ def report():
 def end_program():
     pass
 
+# Moves the session into a stage, used at the start and at each hand-over.
+# A stage whose response count is set to 0 (or less) in the settings is
+# skipped completely: no trials run and nothing is recorded for it. If every
+# remaining stage is skipped, the session ends as it does after Stage 4.
+def enter_stage(stage):
+    setups = [stage_0_setup, stage_1_setup, stage_2_setup, stage_3_setup, stage_4_setup]
+    counts = [Stage0Resp, Stage1Resp, Stage2Resp, Stage3Resp, Stage4Resp]
+    for s in range(stage, len(setups)):
+        if counts[s] > 0:
+            setups[s]()
+            return
+        print(f"stage {s} skipped (responses set to 0)")
+    play_sound('end_tone.wav')  # play tone for end
+    exit_program()
+
 # setup function, called on program start
 def start():
     def full_start():
-        if StartStage == 0:
-            stage_0_setup()
-        if StartStage == 1:
-            stage_1_setup()
-        if StartStage == 2:
-            stage_2_setup()
-        if StartStage == 3:
-            stage_3_setup()
-        if StartStage == 4:
-            stage_4_setup()
+        enter_stage(StartStage)
 
     start_button.destroy()
     gui.after(int(Blackout * 60 * 1000), full_start)
@@ -811,8 +837,10 @@ def settings():
     # gets current values for all variables listed below
     def update_vals():
         global DelivTimer, LimitedHold, Stage0Resp, Stage1Resp, Stage2Resp, Stage3Resp, \
-            Stage4Resp, StartStage, Blackout, Autoshape, fr_req, Subject, ShowCursor
+            Stage4Resp, StartStage, Blackout, Autoshape, fr_req, Subject, ShowCursor, \
+            SessionDate
         Subject = e_subj.get().strip() or "Sbj000"
+        SessionDate = datetime.date.today().strftime("%m-%d-%Y")
         DelivTimer = float(e4.get())
         LimitedHold = float(e5.get())
         Blackout = float(e6.get())
