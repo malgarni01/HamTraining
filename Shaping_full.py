@@ -99,6 +99,9 @@ shutting_down = False   # set once the session is over; makes the exit path
                         # idempotent and stops any stage from scheduling
                         # another trial behind the summary
 
+handling_touch = False  # True while press()/incorrect() is running; the stage
+                        # loops wait for it to clear (see one_touch_at_a_time)
+
 # Default Settings (Can be modified)
 Subject = "Sbj000"
 SessionDate = datetime.date.today().strftime("%m-%d-%Y")  # MM-DD-YYYY, for the trial file name;
@@ -163,8 +166,32 @@ def neutral_flash():
     gui.update()
 
 
+def one_touch_at_a_time(handler):
+    """Mark a touch as in progress for as long as its handler runs.
+
+    The flashes call gui.update(), which also runs any stage loop tick that
+    is due. Before this guard, a touch in the last ~60 ms of the limited hold
+    let the loop time the trial out mid-flash, log an omission and set up the
+    next trial; the handler then finished, hid the new box and set response,
+    so the next trial paid a pellet with no touch (negative Latency in the
+    CSV). Now the loops wait while handling_touch is set, and a touch that
+    arrives during another touch's flash is ignored.
+    """
+    def guarded(var):
+        global handling_touch
+        if handling_touch:
+            return
+        handling_touch = True
+        try:
+            handler(var)
+        finally:
+            handling_touch = False
+    return guarded
+
+
 # press function handles correct button presses
 
+@one_touch_at_a_time
 def press(var):
     global response, size_adj_correct, fr_resp, inc_resp, press_time
 
@@ -203,6 +230,7 @@ def press(var):
 
 # incorrect function handles incorrect button presses
 
+@one_touch_at_a_time
 def incorrect(var):
     # fr_resp, not fr_rsp: the old name was a typo, so the reset below bound a
     # local and the global partial count on the target was never cleared.
@@ -439,6 +467,10 @@ def stage_0():
     # loop function
     def stage_0_loop():
         global response, hand_shape_resp, stage_0_start_time, stage_0_responses, color_on
+        # a touch is mid-flash; let it finish before checking anything
+        if handling_touch:
+            stage_0()
+            return
 
         # response is the button variable, default set to 0
         # on button press, the response variable is changed in the press() function, triggering this if statement
@@ -526,6 +558,10 @@ def stage_1_setup():
 def stage_1():
     def stage_1_loop():
         global response, hand_shape_resp, stage_1_start_time, stage_1_responses
+        # a touch is mid-flash; let it finish before checking anything
+        if handling_touch:
+            stage_1()
+            return
 
         # response if block, waiting for button press
         if response != 0:
@@ -582,6 +618,10 @@ def stage_2_setup():
 def stage_2():
     def stage_2_loop():
         global response, stage_2_start_time, stage_2_responses
+        # a touch is mid-flash; let it finish before checking anything
+        if handling_touch:
+            stage_2()
+            return
 
         # response if block, waiting for button press
         if response != 0:
@@ -638,6 +678,10 @@ def stage_3_setup():
 def stage_3():
     def stage_3_loop():
         global response, stage_3_start_time, stage_3_responses, stage_3_omissions
+        # a touch is mid-flash; let it finish before checking anything
+        if handling_touch:
+            stage_3()
+            return
 
         # response if block, waiting for button press
         if response != 0:
@@ -724,6 +768,10 @@ def stage_4_setup():
 def stage_4():
     def stage_4_loop():
         global response, stage_4_start_time, stage_4_responses, stage_4_omissions, inc, stage_4_incorrects
+        # a touch is mid-flash; let it finish before checking anything
+        if handling_touch:
+            stage_4()
+            return
 
         # incorrect if block, waiting for button press
         if inc != 0:
