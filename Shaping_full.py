@@ -107,7 +107,7 @@ Subject = "Sbj000"
 SessionDate = datetime.date.today().strftime("%m-%d-%Y")  # MM-DD-YYYY, for the trial file name;
                                                  # fixed at Start so a session running
                                                  # past midnight stays in one file
-Autoshape = 1  # if this variable is set to 1, goes to autoshaping for stage 0, otherwise does keyboard hand shaping
+Autoshape = 0  # if this variable is set to 1, goes to autoshaping for stage 0, otherwise does keyboard hand shaping
 DelivTimer = 30  # stage 0 and stage 2 timeout value for timer
 LimitedHold = 25	#Time which animal has to respond
 Stage0Resp = 20
@@ -947,7 +947,7 @@ def settings():
     l6 = tk.Label(popup, text=("Blackout (min):\n" + str(Blackout)), font=24)
     options = ["Yes", "No"]
     auto_var = StringVar(popup)
-    auto_var.set(options[0])
+    auto_var.set("Yes" if Autoshape == 1 else "No")  # opens on the default above
     l7 = tk.Label(popup, text=("Autoshape: " + str(Autoshape) + "\n(1=Yes)"), font=24)
     dropdown = OptionMenu(popup, auto_var, *options)
     l9 = tk.Label(popup, text=("FR Requirement:\n" + str(fr_req)), font=24)
