@@ -10,6 +10,10 @@ experimenter at session start:
                 reinforced. Priming with the shaped stimulus immediately
                 before the choice is what teaches the animal that yellow is
                 still the correct option once a second colour is on screen.
+                Optionally (on by default) the priming press is itself
+                reinforced -- pellet and tone, as for a correct choice --
+                and the choices follow after an adjustable delay so the
+                animal can eat first.
 
   Testing       The same yellow/blue choice with the priming screen omitted:
                 the choice pair appears at trial onset. Used for cognitive
@@ -126,7 +130,9 @@ MaxTrials = 60         # first presentations; correction trials do not count
 LimitedHold = 25       # seconds the animal has to respond, each of the two steps
 FRCentre = 1           # presses required on the priming square (Transitional only)
 FRChoice = 1           # presses required on a choice box to commit it
-ReinfAmt = 1           # pellets per correct choice
+ReinfAmt = 1           # pellets per correct choice, and per priming press
+PrimeReward = 1        # 1 = completing the priming ratio is reinforced (Transitional only)
+PrimeDelay = 0.0       # seconds from the priming pellet to the choices appearing
 Blackout = 0.15        # delay before the session starts, minutes
 Correction = 0         # 1 = correction trials enabled (either stage)
 SessionCap = 60        # hard stop, minutes
@@ -163,7 +169,8 @@ start_latency = 0.0
 awaiting = "none"          # "centre" | "choice" | "none"
 timeout_id = None          # cancellable after() id for LimitedHold
 iti_id = None              # cancellable after() id for the ITI
-pellets_commanded = 0
+pellets_commanded = 0      # every pellet commanded, priming and choice
+priming_pellets = 0        # the share of pellets_commanded earned on the priming screen
 shutting_down = False      # set once the session is over; makes the exit
                            # path idempotent and stops anything scheduling
                            # or scoring another trial behind the summary
@@ -336,18 +343,23 @@ def session_csv_path():
 #                bias can only be judged against what was actually offered.
 #   CorrectX/Y, ChosenX/Y   box centres in relative screen coordinates, for
 #                the spatial analyses the L/R columns are too coarse for.
+#   PrimingPellets  session total of pellets earned on the priming screen.
+#                PelletsCommanded still counts every pellet, priming
+#                included, so it reconciles against the hopper on its own;
+#                subtract this for the pellets earned by correct choices.
 TRIAL_COLUMNS = ["Subject", "Date", "Phase", "Trial", "Presentation",
                  "SampleColor", "CorrectSide", "ChosenSide", "ChosenColor",
                  "Correct", "StartLatency", "ChoiceLatency", "Omission",
                  "PelletsCommanded",
                  "Layout", "NumBlue", "BoxesLeft",
-                 "CorrectX", "CorrectY", "ChosenX", "ChosenY"]
+                 "CorrectX", "CorrectY", "ChosenX", "ChosenY",
+                 "PrimingPellets"]
 
 SESSION_COLUMNS = ["Subject", "Date", "Phase", "TrialsCompleted",
                    "FirstPresAccuracy", "LeftChoicePct", "CorrectionTrials",
                    "StartOmissions", "ChoiceOmissions", "MedianStartLatency",
                    "MedianChoiceLatency", "PelletsCommanded",
-                   "Layout", "NumBlue"]
+                   "Layout", "NumBlue", "PrimingPellets"]
 
 
 def append_path(path, columns):
@@ -450,6 +462,7 @@ def record(presentation, chosen_slot, correct, omission, choice_latency):
         "CorrectY": round(correct_pos[1], 4),
         "ChosenX": round(chosen_pos[0], 4) if chosen_pos is not None else "",
         "ChosenY": round(chosen_pos[1], 4) if chosen_pos is not None else "",
+        "PrimingPellets": priming_pellets,
     }
     records.append(row)
     write_row(row)
@@ -484,6 +497,7 @@ def summarise():
         "PelletsCommanded": pellets_commanded,
         "Layout": LAYOUT_LABELS[Layout],
         "NumBlue": int(NumBlue) if Layout == LAYOUT_RANDOM else 1,
+        "PrimingPellets": priming_pellets,
     }
 
 
@@ -495,8 +509,12 @@ def write_session(summary):
 # ---------------------------------------------------------------------------
 # Reinforcement
 
-def reinforcement():
+def reinforcement(priming=False):
     """Command ReinfAmt pellets and the tone.
+
+    priming=True marks pellets earned on the priming screen; they count
+    towards pellets_commanded like any other and are also tallied in
+    priming_pellets so the two sources can be told apart in the data.
 
     Ported from Shaping_full.py:162-203 with the IR-verification block
     removed. On the MED-PC backend write_output(1, ACTIVE) arms the feeder
@@ -504,7 +522,7 @@ def reinforcement():
     Mock/serial these are plain output toggles. See the module docstring on
     why no delivery check is made here.
     """
-    global pellets_commanded
+    global pellets_commanded, priming_pellets
 
     for _ in range(int(ReinfAmt)):
         device.write_output(1, IOState.ACTIVE)   # Turn on pellet dispenser
@@ -514,8 +532,11 @@ def reinforcement():
         device.write_output(1, IOState.INACTIVE)  # Stop asserting pellet dispenser
         device.write_output(2, IOState.INACTIVE)  # Turn off beeper
         pellets_commanded += 1
+        if priming:
+            priming_pellets += 1
 
-    print(f"[REWARD] trial {trial}: commanded={int(ReinfAmt)} "
+    source = "priming" if priming else "choice"
+    print(f"[REWARD] trial {trial} ({source}): commanded={int(ReinfAmt)} "
           f"session_total={pellets_commanded} (no delivery sensor -- "
           f"reconcile manually per protocol 9.2)")
 
@@ -671,10 +692,8 @@ def centre_pressed(_event=None):
     if awaiting != "centre":
         return
 
-    # Count first, gate immediately. No tone here at any point: trial start is
-    # already marked by 7500.long.wav, and sounding 2900 -- the reinforcement
-    # tone -- for merely clearing the priming screen devalues it as a signal.
-    # The choices appearing is the feedback for a completed priming ratio.
+    # Count first, gate immediately. Sub-criterion presses are silent, as on
+    # the choice boxes: only a completed priming ratio can earn the tone.
     fr_count["centre"] += 1
     if fr_count["centre"] < FRCentre:
         neutral_flash()
@@ -683,7 +702,27 @@ def centre_pressed(_event=None):
     cancel_timeout()
     start_latency = perf_counter() - centre_onset
     centre_btn.place_forget()
-    present_choices()
+
+    if not PrimeReward:
+        # The choices appearing is the feedback for a completed priming ratio.
+        present_choices()
+        return
+
+    # Reinforced exactly as a correct choice is -- 2900 tone, ReinfAmt
+    # pellets -- so the press on the shaped yellow square stays rewarded
+    # while the second colour is introduced.
+    awaiting = "none"
+    gui.update()
+    play_sound('2900.short.wav')
+    reinforcement(priming=True)
+    # PrimeDelay gives the animal time to collect the pellet before the
+    # choices appear. The limited hold and ChoiceLatency both start when the
+    # choices do, so time spent eating is not counted against the choice.
+    # Scheduled rather than slept, so report() can cancel it on quit.
+    if PrimeDelay > 0:
+        gui.after(int(PrimeDelay * 1000), present_choices)
+    else:
+        present_choices()
 
 
 def present_choices():
@@ -697,6 +736,11 @@ def present_choices():
     depends on which layout is running.
     """
     global awaiting, choice_onset, active_choices
+
+    # Can be reached from a priming delay, or after reinforcement() has
+    # pumped the event loop, with the session already closed by quit.
+    if shutting_down:
+        return
 
     size = RANDOM_CHOICE_SIZE if Layout == LAYOUT_RANDOM else CHOICE_SIZE
 
@@ -866,7 +910,7 @@ def settings():
     def update_vals():
         global Stage, Subject, MaxTrials, LimitedHold, FRCentre, FRChoice, \
             ReinfAmt, Blackout, Correction, SessionCap, ShowCursor, \
-            Layout, NumBlue, SessionDate
+            Layout, NumBlue, SessionDate, PrimeReward, PrimeDelay
 
         Stage = int(stage_var.get())
         Layout = (LAYOUT_RANDOM if layout_var.get() == LAYOUT_MENU[LAYOUT_RANDOM]
@@ -885,15 +929,19 @@ def settings():
         SessionCap = float(e_cap.get())
         Correction = 1 if corr_var.get() == "Yes" else 0
         ShowCursor = 1 if cursor_var.get() == "Visible" else 0
+        PrimeReward = int(prime_var.get())
+        PrimeDelay = float(e_pdelay.get())
 
     def setup():
         update_vals()
         popup.destroy()
 
     def stage_defaults():
-        """Grey out the priming ratio in Testing, where nothing primes."""
-        e_frc.config(state=("normal" if int(stage_var.get()) == TRANSITIONAL
-                            else "disabled"))
+        """Grey out the priming settings in Testing, where nothing primes."""
+        state = ("normal" if int(stage_var.get()) == TRANSITIONAL
+                 else "disabled")
+        for widget in (e_frc, prime_chk, e_pdelay):
+            widget.config(state=state)
 
     def layout_defaults():
         """Grey out the blue-box count outside the randomized layout."""
@@ -919,6 +967,7 @@ def settings():
         ("Subject:", 1), ("Trials\n(first presentations):", 2),
         ("Limited\nHold (s):", 3), ("FR priming\n(Transitional only):", 4),
         ("FR choice:", 5), ("Choice layout:", 6),
+        ("Pellet on priming\n(Transitional only):", 7),
     ]
     for text, row in labels:
         tk.Label(popup, text=text, font=24).grid(row=row, column=3, padx=2, pady=15)
@@ -927,6 +976,7 @@ def settings():
         ("Pellets per\ncorrect:", 1), ("Blackout (min):", 2),
         ("Session cap\n(min):", 3), ("Correction trials:", 4),
         ("Mouse cursor:", 5), ("Blue boxes\n(random layout only):", 6),
+        ("Priming delay (s)\n(Transitional only):", 7),
     ]
     for text, row in labels2:
         tk.Label(popup, text=text, font=24).grid(row=row, column=5, padx=2, pady=15)
@@ -939,10 +989,11 @@ def settings():
     e_reinf = tk.Entry(popup, width=4, font=24)
     e_black = tk.Entry(popup, width=4, font=24)
     e_cap = tk.Entry(popup, width=4, font=24)
+    e_pdelay = tk.Entry(popup, width=4, font=24)
 
     for widget, row in [(e_subj, 1), (e_trials, 2), (e_hold, 3), (e_frc, 4), (e_frx, 5)]:
         widget.grid(row=row, column=4, ipadx=5, ipady=8, padx=7, pady=10)
-    for widget, row in [(e_reinf, 1), (e_black, 2), (e_cap, 3)]:
+    for widget, row in [(e_reinf, 1), (e_black, 2), (e_cap, 3), (e_pdelay, 7)]:
         widget.grid(row=row, column=6, ipadx=5, ipady=8, padx=7, pady=10)
 
     corr_var = StringVar(popup)
@@ -973,6 +1024,12 @@ def settings():
                            *[str(n) for n in range(1, MAX_BLUE + 1)])
     blue_menu.grid(row=6, column=6, padx=2, pady=10)
 
+    # On by default: the priming press pays out ReinfAmt pellets and the
+    # reinforcement tone unless this is unticked.
+    prime_var = IntVar(popup, value=PrimeReward)
+    prime_chk = Checkbutton(popup, variable=prime_var)
+    prime_chk.grid(row=7, column=4, padx=2, pady=10)
+
     e_subj.insert(0, Subject)
     e_trials.insert(0, str(MaxTrials))
     e_hold.insert(0, str(LimitedHold))
@@ -981,14 +1038,15 @@ def settings():
     e_reinf.insert(0, str(ReinfAmt))
     e_black.insert(0, str(Blackout))
     e_cap.insert(0, str(SessionCap))
+    e_pdelay.insert(0, str(PrimeDelay))
     stage_defaults()
     layout_defaults()
 
     tk.Button(popup, text="Start", command=setup, font=("bold", "14"),
-              height=3, width=12).grid(row=7, column=1, columnspan=2, pady=20)
+              height=3, width=12).grid(row=8, column=1, columnspan=2, pady=20)
 
     popup.grid_rowconfigure(0, weight=1)
-    popup.grid_rowconfigure(8, weight=1)
+    popup.grid_rowconfigure(9, weight=1)
     popup.grid_columnconfigure(0, weight=1)
     popup.grid_columnconfigure(7, weight=1)
 
@@ -1040,7 +1098,9 @@ def report_end():
         ("Choice\nomissions", summary["ChoiceOmissions"]),
         ("Median start\nlatency (s)", summary["MedianStartLatency"]),
         ("Median choice\nlatency (s)", summary["MedianChoiceLatency"]),
-        ("Pellets\ncommanded", summary["PelletsCommanded"]),
+        ("Pellets\ncommanded",
+         f"{summary['PelletsCommanded']} ({summary['PrimingPellets']} priming)"
+         if Stage == TRANSITIONAL else summary["PelletsCommanded"]),
     ]
     for i, (label, value) in enumerate(cells):
         col = 1 + (i % 3)
