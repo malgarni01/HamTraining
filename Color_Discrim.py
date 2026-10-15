@@ -347,6 +347,9 @@ def session_csv_path():
 #                PelletsCommanded still counts every pellet, priming
 #                included, so it reconciles against the hopper on its own;
 #                subtract this for the pellets earned by correct choices.
+# The session file also ends with MeanStartLatency, SDStartLatency,
+# MeanChoiceLatency and SDChoiceLatency, over the same latencies as the
+# medians. SD is the sample SD, blank when fewer than two latencies exist.
 TRIAL_COLUMNS = ["Subject", "Date", "Phase", "Trial", "Presentation",
                  "SampleColor", "CorrectSide", "ChosenSide", "ChosenColor",
                  "Correct", "StartLatency", "ChoiceLatency", "Omission",
@@ -359,7 +362,9 @@ SESSION_COLUMNS = ["Subject", "Date", "Phase", "TrialsCompleted",
                    "FirstPresAccuracy", "LeftChoicePct", "CorrectionTrials",
                    "StartOmissions", "ChoiceOmissions", "MedianStartLatency",
                    "MedianChoiceLatency", "PelletsCommanded",
-                   "Layout", "NumBlue", "PrimingPellets"]
+                   "Layout", "NumBlue", "PrimingPellets",
+                   "MeanStartLatency", "SDStartLatency",
+                   "MeanChoiceLatency", "SDChoiceLatency"]
 
 
 def append_path(path, columns):
@@ -468,6 +473,16 @@ def record(presentation, chosen_slot, correct, omission, choice_latency):
     write_row(row)
 
 
+def _mean(values):
+    return round(statistics.mean(values), 2) if values else ""
+
+
+def _sd(values):
+    """Sample standard deviation; blank with fewer than two values, where
+    it is undefined."""
+    return round(statistics.stdev(values), 2) if len(values) >= 2 else ""
+
+
 def summarise():
     """Session-level numbers. Protocol 8.3 requires accuracy from first
     presentations only; 8.4 requires the left-choice percentage every session.
@@ -498,6 +513,10 @@ def summarise():
         "Layout": LAYOUT_LABELS[Layout],
         "NumBlue": int(NumBlue) if Layout == LAYOUT_RANDOM else 1,
         "PrimingPellets": priming_pellets,
+        "MeanStartLatency": _mean(start_lats),
+        "SDStartLatency": _sd(start_lats),
+        "MeanChoiceLatency": _mean(choice_lats),
+        "SDChoiceLatency": _sd(choice_lats),
     }
 
 
